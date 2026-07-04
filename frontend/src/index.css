@@ -1,15 +1,21 @@
-*, *::before, *::after {
+@import "tailwindcss";
+
+@theme {
+  --color-unicaja: #00A651;
+  --color-unicaja-dark: #00843F;
+  --color-unicaja-light: #4CC87A;
+  --font-sans: 'Inter', system-ui, sans-serif;
+}
+
+* {
   box-sizing: border-box;
-  margin: 0;
-  padding: 0;
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #0f172a;
-  color: #e2e8f0;
+  font-family: var(--font-sans);
   height: 100vh;
   overflow: hidden;
+  background: #F8FAFC;
 }
 
 #root {

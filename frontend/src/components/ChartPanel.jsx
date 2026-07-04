@@ -14,40 +14,66 @@ import {
   YAxis,
 } from 'recharts'
 
-const COLORS = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#14b8a6']
+const COLORS = ['#00A651', '#10B981', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444', '#14B8A6', '#EC4899']
 
-const formatEur = (value) => `${value.toFixed(2)}€`
+const formatEur = (value) =>
+  typeof value === 'number'
+    ? value.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' })
+    : value
 
-export default function ChartPanel({ chartType, chartData, chartTitle }) {
-  if (!chartType || !chartData || chartData.length === 0) {
-    return (
-      <div style={styles.empty}>
-        <p style={styles.emptyText}>Haz una pregunta para ver gráficos aquí</p>
-        <p style={styles.emptyHint}>Ejemplo: "¿En qué categorías gasto más?"</p>
-      </div>
-    )
-  }
+function CustomTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null
+  return (
+    <div className="bg-white border border-gray-100 rounded-xl shadow-lg px-3 py-2 text-sm">
+      {label && <p className="text-gray-500 text-xs mb-1">{label}</p>}
+      <p className="font-semibold text-gray-800">{formatEur(payload[0].value)}</p>
+    </div>
+  )
+}
+
+export default function ChartPanel({ chartType, chartData, chartTitle, onClose }) {
+  if (!chartType || !chartData || chartData.length === 0) return null
 
   return (
-    <div style={styles.container}>
-      {chartTitle && <h3 style={styles.title}>{chartTitle}</h3>}
+    <div className="mx-4 mt-4 bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+      <div className="flex items-center justify-between mb-3">
+        {chartTitle && (
+          <h3 className="text-sm font-semibold text-gray-700">{chartTitle}</h3>
+        )}
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="ml-auto text-gray-300 hover:text-gray-500 transition-colors text-lg leading-none cursor-pointer"
+            aria-label="Cerrar gráfico"
+          >
+            ×
+          </button>
+        )}
+      </div>
 
-      <ResponsiveContainer width="100%" height={280}>
+      <ResponsiveContainer width="100%" height={220}>
         {chartType === 'bar' ? (
-          <BarChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-            <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 12 }} />
-            <YAxis tickFormatter={formatEur} tick={{ fill: '#94a3b8', fontSize: 11 }} />
-            <Tooltip formatter={formatEur} contentStyle={styles.tooltip} />
-            <Bar dataKey="value" fill="#6366f1" radius={[4, 4, 0, 0]} />
+          <BarChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+            <XAxis dataKey="name" tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis tickFormatter={formatEur} tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+            <Tooltip content={<CustomTooltip />} cursor={{ fill: '#F8FAFC' }} />
+            <Bar dataKey="value" fill="#00A651" radius={[6, 6, 0, 0]} maxBarSize={48} />
           </BarChart>
         ) : chartType === 'line' ? (
-          <LineChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-            <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 12 }} />
-            <YAxis tickFormatter={formatEur} tick={{ fill: '#94a3b8', fontSize: 11 }} />
-            <Tooltip formatter={formatEur} contentStyle={styles.tooltip} />
-            <Line type="monotone" dataKey="value" stroke="#6366f1" strokeWidth={2} dot={{ fill: '#6366f1' }} />
+          <LineChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+            <XAxis dataKey="name" tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis tickFormatter={formatEur} tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+            <Tooltip content={<CustomTooltip />} />
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke="#00A651"
+              strokeWidth={2.5}
+              dot={{ fill: '#00A651', r: 4, strokeWidth: 0 }}
+              activeDot={{ r: 6, fill: '#00A651' }}
+            />
           </LineChart>
         ) : (
           <PieChart>
@@ -55,61 +81,25 @@ export default function ChartPanel({ chartType, chartData, chartTitle }) {
               data={chartData}
               cx="50%"
               cy="50%"
-              outerRadius={100}
+              outerRadius={88}
+              innerRadius={44}
               dataKey="value"
               nameKey="name"
-              label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-              labelLine={{ stroke: '#475569' }}
+              paddingAngle={2}
             >
               {chartData.map((_, i) => (
-                <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                <Cell key={i} fill={COLORS[i % COLORS.length]} stroke="none" />
               ))}
             </Pie>
-            <Tooltip formatter={formatEur} contentStyle={styles.tooltip} />
-            <Legend wrapperStyle={{ color: '#94a3b8', fontSize: 12 }} />
+            <Tooltip content={<CustomTooltip />} />
+            <Legend
+              iconType="circle"
+              iconSize={8}
+              wrapperStyle={{ color: '#64748B', fontSize: 11 }}
+            />
           </PieChart>
         )}
       </ResponsiveContainer>
     </div>
   )
-}
-
-const styles = {
-  container: {
-    background: '#1e293b',
-    borderRadius: 12,
-    padding: '20px',
-    height: '100%',
-  },
-  title: {
-    color: '#e2e8f0',
-    fontSize: 15,
-    fontWeight: 600,
-    marginBottom: 16,
-  },
-  tooltip: {
-    background: '#0f172a',
-    border: '1px solid #334155',
-    borderRadius: 8,
-    color: '#e2e8f0',
-  },
-  empty: {
-    background: '#1e293b',
-    borderRadius: 12,
-    padding: '20px',
-    height: '100%',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  emptyText: {
-    color: '#475569',
-    fontSize: 15,
-  },
-  emptyHint: {
-    color: '#334155',
-    fontSize: 13,
-  },
 }
