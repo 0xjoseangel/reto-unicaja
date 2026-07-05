@@ -38,9 +38,15 @@ class ChartDataPoint(BaseModel):
     value: float
 
 
+class HistoryMessage(BaseModel):
+    role: str   # "user" | "assistant"
+    content: str
+
+
 class ChatRequest(BaseModel):
     message: str
     user_id: int = 1
+    history: list[HistoryMessage] = []
 
 
 class ChatResponse(BaseModel):

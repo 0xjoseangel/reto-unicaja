@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { sendChatMessage } from '../services/api'
+import InlineChart from './InlineChart'
 
 const SUGGESTIONS = [
   '¿Cuál es mi saldo actual?',
@@ -8,13 +9,15 @@ const SUGGESTIONS = [
   'Evolución mensual de gastos',
 ]
 
-export default function ChatBox({ onChartData, hasChart }) {
+export default function ChatBox() {
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
       text: '¡Hola! Soy tu asistente financiero personal. Puedes preguntarme sobre tus gastos, ingresos o saldo. ¿En qué puedo ayudarte hoy?',
     },
   ])
+  // Historial solo texto (user/assistant) que se envía al backend en cada petición
+  const [history, setHistory] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const bottomRef = useRef(null)
@@ -31,16 +34,27 @@ export default function ChatBox({ onChartData, hasChart }) {
     setInput('')
     setLoading(true)
 
+    // El historial que enviamos incluye ya el mensaje actual del usuario
+    const updatedHistory = [...history, { role: 'user', content: message }]
+
     try {
-      const data = await sendChatMessage(message)
-      setMessages((prev) => [...prev, { role: 'assistant', text: data.response }])
+      const data = await sendChatMessage(message, updatedHistory)
+      const newMessages = [{ role: 'assistant', text: data.response }]
+
       if (data.chart_type && data.chart_data) {
-        onChartData({
-          chartType: data.chart_type,
-          chartData: data.chart_data,
-          chartTitle: data.chart_title,
+        newMessages.push({
+          role: 'chart',
+          chart: {
+            type: data.chart_type,
+            data: data.chart_data,
+            title: data.chart_title,
+          },
         })
       }
+
+      setMessages((prev) => [...prev, ...newMessages])
+      // Guardar en el historial: mensaje del usuario + respuesta del asistente
+      setHistory([...updatedHistory, { role: 'assistant', content: data.response }])
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -55,28 +69,42 @@ export default function ChatBox({ onChartData, hasChart }) {
     <div className="flex flex-col h-full bg-transparent">
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
-        {messages.map((msg, i) => (
-          <div key={i} className={`flex gap-2.5 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            {msg.role === 'assistant' && (
-              <div className="w-7 h-7 rounded-full bg-unicaja/15 border border-unicaja/30 flex items-center justify-center flex-none mt-0.5 text-[10px] font-bold text-unicaja">
-                AI
+        {messages.map((msg, i) => {
+          if (msg.role === 'chart') {
+            return (
+              <div key={i} className="flex justify-start pl-9">
+                <InlineChart
+                  chartType={msg.chart.type}
+                  chartData={msg.chart.data}
+                  chartTitle={msg.chart.title}
+                />
               </div>
-            )}
-            {msg.role === 'user' ? (
-              <div className="max-w-[75%] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line bubble-animate
-                bg-unicaja text-white rounded-2xl rounded-br-sm
-                shadow-[0_0_24px_rgba(0,166,81,0.30)]">
-                {msg.text}
-              </div>
-            ) : (
-              <div className="bezel-outer max-w-[75%] bubble-animate">
-                <div className="bezel-inner rounded-[19px] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line text-white/85">
+            )
+          }
+
+          return (
+            <div key={i} className={`flex gap-2.5 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              {msg.role === 'assistant' && (
+                <div className="w-7 h-7 rounded-full bg-unicaja/15 border border-unicaja/30 flex items-center justify-center flex-none mt-0.5 text-[10px] font-bold text-unicaja">
+                  AI
+                </div>
+              )}
+              {msg.role === 'user' ? (
+                <div className="max-w-[75%] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line bubble-animate
+                  bg-unicaja text-white rounded-2xl rounded-br-sm
+                  shadow-[0_0_24px_rgba(0,166,81,0.30)]">
                   {msg.text}
                 </div>
-              </div>
-            )}
-          </div>
-        ))}
+              ) : (
+                <div className="bezel-outer max-w-[75%] bubble-animate">
+                  <div className="bezel-inner rounded-[19px] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line text-white/85">
+                    {msg.text}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
 
         {/* Loading dots */}
         {loading && (
@@ -138,8 +166,7 @@ export default function ChatBox({ onChartData, hasChart }) {
                 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
             >
               <span className="flex items-center gap-1.5 bg-unicaja rounded-[12px] px-4 py-2
-                text-white text-sm font-semibold
-                transition-all duration-300 ease-spring">
+                text-white text-sm font-semibold">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
                 </svg>

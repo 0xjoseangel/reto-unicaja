@@ -8,4 +8,5 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 @router.post("/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    return await process_chat(request.message, request.user_id)
+    history = [m.model_dump() for m in request.history]
+    return await process_chat(request.message, request.user_id, history)

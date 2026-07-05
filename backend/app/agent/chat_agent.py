@@ -1,28 +1,31 @@
 """
-Agente conversacional que combina:
-  - MCP (tools financieros definidos en financial_mcp.py)
-  - Gemini (decide qué tool llamar y genera la respuesta)
+Agente conversacional usando Groq (llama-3.3-70b-versatile) con tool calling.
 
-Flujo de una petición:
-  1. Se envía el mensaje del usuario a Gemini junto con las definiciones de tools.
-  2. Gemini responde con una llamada a tool (function_call).
-  3. El agente ejecuta la función Python correspondiente (consulta SQLite).
-  4. El resultado se devuelve a Gemini como function_response.
-  5. Gemini llama a present_answer con la respuesta estructurada final.
-  6. El agente extrae chart_type + chart_data y construye el ChatResponse.
+Flujo en dos fases:
+  Fase 1 — El modelo llama tools de datos (SQLite) en un bucle hasta tener toda
+            la información que necesita.
+  Fase 2 — Se le pide una respuesta estructurada en JSON (response_format json_object)
+            con el texto de respuesta y los datos para el gráfico.
+
+Separar las dos fases evita problemas de validación de Llama con present_answer
+como tool y aprovecha el JSON mode nativo de Groq.
 """
 import asyncio
 import json
 
-from google import genai
-from google.genai import types
+from groq import Groq
 
 from app.agent.financial_mcp import (
     get_category_breakdown,
     get_expenses_by_category,
     get_financial_summary,
+    get_largest_expenses,
     get_monthly_evolution,
+    get_places_by_category,
+    get_recent_transactions,
+    get_spending_analysis,
     get_transaction_count,
+    search_specific_transactions,
 )
 from app.core.config import settings
 from app.schemas.financial import ChatResponse, ChartDataPoint
@@ -31,44 +34,189 @@ SYSTEM_PROMPT = """Eres un asistente financiero personal que responde siempre en
 
 Tienes acceso a herramientas que consultan la base de datos financiera del usuario.
 Cuando el usuario haga una pregunta:
-1. Usa la herramienta más adecuada para obtener los datos reales.
-2. Analiza los datos recibidos.
-3. Llama SIEMPRE a present_answer para entregar la respuesta final estructurada.
+1. Usa la herramienta o herramientas necesarias para obtener los datos reales.
+2. Cuando tengas toda la información, responde con un JSON estructurado.
 
-Guía para el campo chart_type en present_answer:
-- "bar"  → comparar dos o más valores (ej: ingresos vs gastos)
-- "line" → evolución a lo largo del tiempo (ej: gastos mensuales)
-- "pie"  → distribución porcentual (ej: desglose por categorías)
-- "none" → respuesta solo de texto, sin gráfico
-
-chart_data debe ser un JSON array: [{"name": "...", "value": número}, ...]
-Si no hay gráfico, usa chart_data="[]".
+Guía de herramientas:
+- get_financial_summary        → resumen general (saldo, ingresos, gastos totales)
+- get_expenses_by_category     → total gastado en una categoría concreta
+- get_monthly_evolution        → evolución mes a mes de una categoría
+- get_category_breakdown       → desglose de TODAS las categorías en un período
+- get_transaction_count        → número de transacciones (visitas/compras)
+- get_places_by_category       → establecimientos concretos visitados (ej: "¿a qué restaurantes he ido?")
+- get_spending_analysis        → análisis de si el usuario gasta demasiado comparado con su promedio
+- search_specific_transactions → busca por nombre de comercio (ej: "Netflix", "Zara")
+- get_recent_transactions      → últimos movimientos cronológicos
+- get_largest_expenses         → gastos individuales más grandes en un período
 """
 
+FINAL_PROMPT = """Ahora genera la respuesta final en JSON con esta estructura exacta:
+{
+  "response_text": "respuesta amigable en español para el usuario",
+  "chart_type": "bar | line | pie | none",
+  "chart_data": "[{\\"name\\":\\"X\\",\\"value\\":0}]",
+  "chart_title": "título descriptivo del gráfico, o vacío si no hay gráfico"
+}
 
-# ── Tool especial: salida estructurada ────────────────────────────────────────
+Guía chart_type:
+- "bar"  → comparar valores (top categorías, ingresos vs gastos)
+- "line" → evolución temporal (gastos mes a mes)
+- "pie"  → distribución porcentual (desglose de categorías)
+- "none" → solo texto (listas de lugares, análisis, respuestas simples)
 
-def present_answer(
-    response_text: str,
-    chart_type: str,
-    chart_data: str,
-    chart_title: str,
-) -> dict:
-    """Presenta la respuesta final al usuario. DEBES llamar a esta función al terminar.
+chart_data es un string JSON array. Si chart_type es "none" usa chart_data="[]".
+"""
 
-    Args:
-        response_text: Respuesta en lenguaje natural para mostrar en el chat.
-        chart_type: Tipo de gráfico — 'bar', 'line', 'pie' o 'none'.
-        chart_data: JSON array con los datos del gráfico: '[{"name":"X","value":0}]'
-        chart_title: Título descriptivo del gráfico (vacío si chart_type es 'none').
-    """
-    return {
-        "response_text": response_text,
-        "chart_type": chart_type,
-        "chart_data": chart_data,
-        "chart_title": chart_title,
-    }
+# ── Definición de tools en formato OpenAI ────────────────────────────────────
 
+_PERIOD = ["current_month", "last_month", "last_3_months", "all_time"]
+_CAT = (
+    "Categoría del gasto: restaurantes, supermercado, transporte, "
+    "alquiler, ocio, salud, ropa, servicios, salario."
+)
+
+TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_financial_summary",
+            "description": "Resumen financiero: saldo total, ingresos, gastos y top categorías.",
+            "parameters": {"type": "object", "properties": {"user_id": {"type": "integer"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_expenses_by_category",
+            "description": "Total gastado en una categoría en un período.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": _CAT},
+                    "period": {"type": "string", "enum": _PERIOD},
+                    "user_id": {"type": "integer"},
+                },
+                "required": ["category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_monthly_evolution",
+            "description": "Evolución mensual de gastos en una categoría durante 12 meses.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": _CAT},
+                    "user_id": {"type": "integer"},
+                },
+                "required": ["category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_category_breakdown",
+            "description": "Desglose de gastos por todas las categorías en un período.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string", "enum": _PERIOD},
+                    "user_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_transaction_count",
+            "description": "Cuenta transacciones en un período, opcionalmente por categoría.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": _CAT},
+                    "period": {"type": "string", "enum": _PERIOD},
+                    "user_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_places_by_category",
+            "description": "Establecimientos visitados en una categoría con visitas y gasto total. Para '¿a qué restaurantes he ido?'",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": _CAT},
+                    "period": {"type": "string", "enum": _PERIOD},
+                    "user_id": {"type": "integer"},
+                },
+                "required": ["category"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_spending_analysis",
+            "description": "Analiza si el usuario gasta demasiado comparando mes actual con promedio histórico.",
+            "parameters": {
+                "type": "object",
+                "properties": {"user_id": {"type": "integer"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_specific_transactions",
+            "description": "Busca transacciones por nombre de comercio o concepto (ej: 'Netflix', 'Zara').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "user_id": {"type": "integer"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_transactions",
+            "description": "Últimos movimientos del usuario.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer"},
+                    "user_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_largest_expenses",
+            "description": "Gastos individuales más grandes en un período.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string", "enum": _PERIOD},
+                    "limit": {"type": "integer"},
+                    "user_id": {"type": "integer"},
+                },
+            },
+        },
+    },
+]
 
 TOOL_MAP = {
     "get_financial_summary": get_financial_summary,
@@ -76,126 +224,151 @@ TOOL_MAP = {
     "get_monthly_evolution": get_monthly_evolution,
     "get_category_breakdown": get_category_breakdown,
     "get_transaction_count": get_transaction_count,
-    "present_answer": present_answer,
+    "get_places_by_category": get_places_by_category,
+    "get_spending_analysis": get_spending_analysis,
+    "search_specific_transactions": search_specific_transactions,
+    "get_recent_transactions": get_recent_transactions,
+    "get_largest_expenses": get_largest_expenses,
 }
-
-ALL_TOOLS = list(TOOL_MAP.values())
 
 
 # ── Bucle agente ──────────────────────────────────────────────────────────────
 
-def _run_chat(message: str, user_id: int) -> ChatResponse:
-    """Ejecuta el bucle agente de forma síncrona (se llama desde asyncio.to_thread)."""
-    client = genai.Client(api_key=settings.google_api_key)
+def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
+    client = Groq(api_key=settings.groq_api_key)
 
-    # Desactivamos AFC (Automatic Function Calling) para gestionar el bucle manualmente.
-    # Esto nos permite capturar el resultado de present_answer y construir el ChatResponse.
-    config = types.GenerateContentConfig(
-        tools=ALL_TOOLS,
-        system_instruction=SYSTEM_PROMPT,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-    )
-    chat = client.chats.create(model="gemini-2.5-flash", config=config)
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    full_message = f"[user_id={user_id}] {message}"
-    response = chat.send_message(full_message)
+    # Inyectar historial previo (solo pares user/assistant en texto plano)
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
 
-    final_answer: dict | None = None
+    messages.append({"role": "user", "content": f"[user_id={user_id}] {message}"})
 
-    for _ in range(6):
-        parts = response.candidates[0].content.parts if (
-            response.candidates and response.candidates[0].content
-        ) else []
-
-        fn_calls = [p.function_call for p in (parts or []) if p.function_call]
-
-        if not fn_calls:
-            break
-
-        result_parts = []
-        for fc in fn_calls:
-            func = TOOL_MAP.get(fc.name)
-            result = func(**dict(fc.args)) if func else {"error": f"tool '{fc.name}' not found"}
-
-            if fc.name == "present_answer":
-                final_answer = result
-
-            result_parts.append(
-                types.Part.from_function_response(
-                    name=fc.name,
-                    response={"result": json.dumps(result, ensure_ascii=False)},
-                )
+    # ── Fase 1: recopilación de datos con tools ───────────────────────────────
+    for _ in range(7):
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                tools=TOOLS_SCHEMA,
+                tool_choice="auto",
             )
-
-        if final_answer:
-            break
-
-        response = chat.send_message(result_parts)
-
-    # ── Construir ChatResponse ────────────────────────────────────────────────
-    if final_answer:
-        chart_type = final_answer.get("chart_type", "none")
-        raw_data = final_answer.get("chart_data", "[]")
-        chart_title = final_answer.get("chart_title") or None
-
-        try:
-            data_list = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
-        except (json.JSONDecodeError, TypeError):
-            data_list = []
-
-        chart_data = (
-            [ChartDataPoint(name=str(d["name"]), value=float(d["value"])) for d in data_list]
-            if data_list else None
-        )
-
-        return ChatResponse(
-            response=final_answer.get("response_text", ""),
-            chart_type=chart_type if chart_type != "none" else None,
-            chart_data=chart_data,
-            chart_title=chart_title,
-        )
-
-    # Fallback: texto plano si Gemini no llamó a present_answer
-    parts = response.candidates[0].content.parts if (
-        response.candidates and response.candidates[0].content
-    ) else []
-    text = "".join(p.text for p in (parts or []) if hasattr(p, "text") and p.text)
-    return ChatResponse(response=text or "No pude procesar tu consulta. Inténtalo de nuevo.")
-
-
-async def process_chat(message: str, user_id: int = 1) -> ChatResponse:
-    if not settings.google_api_key:
-        return ChatResponse(
-            response="API key de Google no configurada. Añade GOOGLE_API_KEY al archivo backend/.env"
-        )
-
-    # Intenta con Gemini hasta 2 veces (con pausa entre intentos)
-    last_err = ""
-    for attempt in range(2):
-        try:
-            return await asyncio.to_thread(_run_chat, message, user_id)
         except Exception as e:
-            last_err = str(e)
-            is_rate_limit = "429" in last_err or "RESOURCE_EXHAUSTED" in last_err
-            if is_rate_limit and attempt == 0:
-                await asyncio.sleep(25)  # espera el tiempo que pide Google (~20s)
-                continue
+            err_str = str(e)
+            # El modelo falló al formatear la llamada → salir con los datos que tengamos
+            if "tool_use_failed" in err_str or "tool call validation" in err_str:
+                break
+            raise
+
+        assistant_msg = response.choices[0].message
+        tool_calls = assistant_msg.tool_calls or []
+
+        assistant_dict: dict = {
+            "role": "assistant",
+            "content": assistant_msg.content or "",
+        }
+        if tool_calls:
+            assistant_dict["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ]
+        messages.append(assistant_dict)
+
+        if not tool_calls:
             break
 
-    # Gemini no disponible → fallback al servicio de keywords
-    if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err:
-        from app.core.database import SessionLocal
-        from app.services.query_service import process_chat as keyword_chat
-        db = SessionLocal()
-        try:
-            result = keyword_chat(db, message, user_id)
-            result.response = "⚡ (modo básico) " + result.response
-            return result
-        finally:
-            db.close()
+        for tc in tool_calls:
+            name = tc.function.name
+            args = json.loads(tc.function.arguments)
+            # Coercionar enteros que el modelo a veces envía como string
+            for key in ("user_id", "limit"):
+                if key in args and isinstance(args[key], str):
+                    try:
+                        args[key] = int(args[key])
+                    except ValueError:
+                        pass
+            func = TOOL_MAP.get(name)
+            result = func(**args) if func else {"error": f"tool '{name}' not found"}
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
 
-    if "403" in last_err or "API_KEY" in last_err.upper():
+    # ── Fase 2: respuesta estructurada en JSON ────────────────────────────────
+    messages.append({"role": "user", "content": FINAL_PROMPT})
+
+    final_response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        response_format={"type": "json_object"},
+    )
+
+    raw = final_response.choices[0].message.content or "{}"
+    data = json.loads(raw)
+
+    chart_type = data.get("chart_type", "none")
+    raw_data = data.get("chart_data", "[]")
+    chart_title = data.get("chart_title") or None
+
+    try:
+        data_list = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+        if not isinstance(data_list, list):
+            data_list = []
+    except (json.JSONDecodeError, TypeError):
+        data_list = []
+
+    # Normalizar claves: el modelo a veces usa month/total, category/amount, etc.
+    _NAME_KEYS = ("name", "month", "categoria", "category", "nombre", "label")
+    _VALUE_KEYS = ("value", "total", "amount", "monto", "valor")
+
+    def _extract(d: dict, keys: tuple) -> str | float | None:
+        for k in keys:
+            if k in d:
+                return d[k]
+        return None
+
+    normalized = []
+    for d in data_list:
+        n = _extract(d, _NAME_KEYS)
+        v = _extract(d, _VALUE_KEYS)
+        if n is not None and v is not None:
+            try:
+                normalized.append(ChartDataPoint(name=str(n), value=float(v)))
+            except (TypeError, ValueError):
+                pass
+
+    chart_data = normalized or None
+
+    return ChatResponse(
+        response=data.get("response_text", ""),
+        chart_type=chart_type if chart_type != "none" else None,
+        chart_data=chart_data,
+        chart_title=chart_title,
+    )
+
+
+async def process_chat(message: str, user_id: int = 1, history: list[dict] | None = None) -> ChatResponse:
+    if not settings.groq_api_key:
         return ChatResponse(
-            response="API key de Google inválida o sin permisos. Revisa el archivo backend/.env"
+            response="API key de Groq no configurada. Añade GROQ_API_KEY al archivo backend/.env"
         )
-    return ChatResponse(response=f"Error inesperado: {last_err[:200]}")
+
+    try:
+        return await asyncio.to_thread(_run_chat, message, user_id, history or [])
+    except Exception as e:
+        err = str(e)
+        if "429" in err or "rate_limit" in err.lower():
+            return ChatResponse(
+                response="El modelo está ocupado ahora mismo. Espera unos segundos e inténtalo de nuevo."
+            )
+        if "401" in err or "invalid_api_key" in err.lower():
+            return ChatResponse(
+                response="API key de Groq inválida. Revisa el archivo backend/.env"
+            )
+        return ChatResponse(response=f"Error inesperado: {err[:200]}")

@@ -208,3 +208,204 @@ def get_transaction_count(
         return {"category": category or "todas", "count": count, "period": period}
     finally:
         db.close()
+
+@mcp.tool()
+def search_specific_transactions(
+    keyword: str,
+    limit: int = 5,
+    user_id: int = 1,
+) -> dict:
+    """Busca transacciones individuales por palabra clave en la descripción
+    (ej: 'Netflix', 'Mercadona', 'Luz'). Usa esto cuando el usuario pregunte
+    por recibos concretos o un gasto específico."""
+    db = SessionLocal()
+    try:
+        ids = _account_ids(db, user_id)
+        rows = db.query(Transaction).filter(
+            Transaction.account_id.in_(ids),
+            Transaction.description.ilike(f"%{keyword}%"),
+        ).order_by(Transaction.date.desc()).limit(limit).all()
+
+        if not rows:
+            return {"message": f"No se encontraron transacciones para '{keyword}'"}
+
+        return {
+            "keyword_searched": keyword,
+            "transactions": [
+                {
+                    "fecha": r.date.strftime("%Y-%m-%d"),
+                    "descripcion": r.description,
+                    "monto": round(r.amount, 2),
+                    "categoria": r.category,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_recent_transactions(limit: int = 5, user_id: int = 1) -> dict:
+    """Obtiene los movimientos más recientes del usuario. Útil para responder
+    a '¿Cuáles son mis últimos gastos?' o para dar contexto de los últimos días."""
+    db = SessionLocal()
+    try:
+        ids = _account_ids(db, user_id)
+        rows = db.query(Transaction).filter(
+            Transaction.account_id.in_(ids),
+        ).order_by(Transaction.date.desc()).limit(limit).all()
+
+        return {
+            "recent_transactions": [
+                {
+                    "fecha": r.date.strftime("%Y-%m-%d"),
+                    "descripcion": r.description,
+                    "monto": round(r.amount, 2),
+                    "tipo": r.transaction_type,
+                    "categoria": r.category,
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_largest_expenses(
+    period: str = "current_month",
+    limit: int = 3,
+    user_id: int = 1,
+) -> dict:
+    """Encuentra los gastos individuales más grandes en un período.
+    Útil para responder por qué el usuario tiene poco saldo o dónde se le fue el dinero."""
+    db = SessionLocal()
+    try:
+        ids = _account_ids(db, user_id)
+        start, end = _period_dates(period)
+        rows = db.query(Transaction).filter(
+            Transaction.account_id.in_(ids),
+            Transaction.transaction_type == "gasto",
+            Transaction.date >= start,
+            Transaction.date <= end,
+        ).order_by(Transaction.amount.desc()).limit(limit).all()
+
+        return {
+            "period": period,
+            "largest_expenses": [
+                {
+                    "fecha": r.date.strftime("%Y-%m-%d"),
+                    "descripcion": r.description,
+                    "monto": round(r.amount, 2),
+                    "categoria": r.category,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_places_by_category(
+    category: str,
+    period: str = "all_time",
+    user_id: int = 1,
+) -> dict:
+    """Lista los establecimientos o lugares concretos visitados en una categoría,
+    con cuántas veces se fue y cuánto se gastó en total en cada uno.
+    Úsalo para responder '¿a qué restaurantes he ido?', '¿en qué supermercados compro?', etc.
+
+    Categorías válidas: restaurantes, supermercado, transporte, alquiler,
+    ocio, salud, ropa, servicios.
+    Períodos válidos: current_month, last_month, last_3_months, all_time.
+    """
+    db = SessionLocal()
+    try:
+        ids = _account_ids(db, user_id)
+        start, end = _period_dates(period)
+        rows = db.query(
+            Transaction.description,
+            func.count(Transaction.id).label("visits"),
+            func.sum(Transaction.amount).label("total"),
+        ).filter(
+            Transaction.account_id.in_(ids),
+            Transaction.category == category,
+            Transaction.transaction_type == "gasto",
+            Transaction.date >= start,
+            Transaction.date <= end,
+        ).group_by(Transaction.description).order_by(
+            func.count(Transaction.id).desc()
+        ).all()
+
+        return {
+            "category": category,
+            "period": period,
+            "places": [
+                {
+                    "nombre": r.description,
+                    "visitas": r.visits,
+                    "total_gastado": round(r.total, 2),
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_spending_analysis(user_id: int = 1) -> dict:
+    """Analiza si el usuario está gastando demasiado en alguna categoría comparando
+    el mes actual con su promedio histórico de los últimos 11 meses.
+    Devuelve cada categoría marcada como 'alto', 'normal' o 'bajo'.
+    Úsalo para responder '¿estoy gastando demasiado?', '¿en qué me paso del presupuesto?'
+    o '¿mi gasto este mes es normal?'
+    """
+    db = SessionLocal()
+    try:
+        ids = _account_ids(db, user_id)
+        now = datetime.now()
+        current_start = now.replace(day=1)
+        eleven_months_ago = current_start - timedelta(days=335)
+
+        current_rows = db.query(
+            Transaction.category,
+            func.sum(Transaction.amount).label("total"),
+        ).filter(
+            Transaction.account_id.in_(ids),
+            Transaction.transaction_type == "gasto",
+            Transaction.date >= current_start,
+        ).group_by(Transaction.category).all()
+
+        hist_rows = db.query(
+            Transaction.category,
+            func.sum(Transaction.amount).label("total"),
+        ).filter(
+            Transaction.account_id.in_(ids),
+            Transaction.transaction_type == "gasto",
+            Transaction.date >= eleven_months_ago,
+            Transaction.date < current_start,
+        ).group_by(Transaction.category).all()
+
+        hist_avg = {r.category: round(r.total / 11, 2) for r in hist_rows}
+        current_dict = {r.category: round(r.total, 2) for r in current_rows}
+
+        analysis = []
+        for cat, curr_total in current_dict.items():
+            avg = hist_avg.get(cat, 0)
+            pct_change = round(((curr_total - avg) / avg) * 100, 1) if avg > 0 else 100.0
+            analysis.append({
+                "categoria": cat,
+                "mes_actual": curr_total,
+                "promedio_mensual": avg,
+                "variacion_pct": pct_change,
+                "estado": "alto" if pct_change > 20 else ("bajo" if pct_change < -20 else "normal"),
+            })
+
+        analysis.sort(key=lambda x: x["variacion_pct"], reverse=True)
+
+        return {"analisis": analysis, "meses_comparados": 11}
+    finally:
+        db.close()

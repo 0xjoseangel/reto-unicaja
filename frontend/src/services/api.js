@@ -1,10 +1,10 @@
 const API_URL = ''
 
-export async function sendChatMessage(message, userId = 1) {
+export async function sendChatMessage(message, history = [], userId = 1) {
   const res = await fetch(`${API_URL}/chat/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, user_id: userId }),
+    body: JSON.stringify({ message, user_id: userId, history }),
   })
   if (!res.ok) throw new Error('Error en la respuesta del servidor')
   return res.json()
