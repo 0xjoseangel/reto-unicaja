@@ -52,38 +52,44 @@ export default function ChatBox({ onChartData, hasChart }) {
   }
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
+    <div className="flex flex-col h-full bg-transparent">
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
         {messages.map((msg, i) => (
           <div key={i} className={`flex gap-2.5 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             {msg.role === 'assistant' && (
-              <div className="w-7 h-7 rounded-full bg-unicaja/10 flex items-center justify-center flex-none mt-0.5 text-sm">
-                🤖
+              <div className="w-7 h-7 rounded-full bg-unicaja/15 border border-unicaja/30 flex items-center justify-center flex-none mt-0.5 text-[10px] font-bold text-unicaja">
+                AI
               </div>
             )}
-            <div
-              className={`max-w-[78%] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line shadow-sm ${
-                msg.role === 'user'
-                  ? 'bg-unicaja text-white rounded-2xl rounded-br-sm'
-                  : 'bg-white text-gray-800 rounded-2xl rounded-bl-sm border border-gray-100'
-              }`}
-            >
-              {msg.text}
-            </div>
+            {msg.role === 'user' ? (
+              <div className="max-w-[75%] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line bubble-animate
+                bg-unicaja text-white rounded-2xl rounded-br-sm
+                shadow-[0_0_24px_rgba(0,166,81,0.30)]">
+                {msg.text}
+              </div>
+            ) : (
+              <div className="bezel-outer max-w-[75%] bubble-animate">
+                <div className="bezel-inner rounded-[19px] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line text-white/85">
+                  {msg.text}
+                </div>
+              </div>
+            )}
           </div>
         ))}
 
-        {/* Loading indicator */}
+        {/* Loading dots */}
         {loading && (
           <div className="flex gap-2.5 justify-start">
-            <div className="w-7 h-7 rounded-full bg-unicaja/10 flex items-center justify-center flex-none text-sm">
-              🤖
+            <div className="w-7 h-7 rounded-full bg-unicaja/15 border border-unicaja/30 flex items-center justify-center flex-none text-[10px] font-bold text-unicaja">
+              AI
             </div>
-            <div className="bg-white border border-gray-100 rounded-2xl rounded-bl-sm px-4 py-3 shadow-sm flex gap-1 items-center">
-              <span className="w-1.5 h-1.5 rounded-full bg-unicaja/60 animate-bounce [animation-delay:0ms]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-unicaja/60 animate-bounce [animation-delay:150ms]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-unicaja/60 animate-bounce [animation-delay:300ms]" />
+            <div className="bezel-outer bubble-animate">
+              <div className="bezel-inner rounded-[19px] px-4 py-3 flex gap-1.5 items-center">
+                <span className="w-1.5 h-1.5 rounded-full bg-unicaja/50" style={{ animation: 'dot-bounce 1.2s 0ms cubic-bezier(0.32,0.72,0,1) infinite' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-unicaja/50" style={{ animation: 'dot-bounce 1.2s 150ms cubic-bezier(0.32,0.72,0,1) infinite' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-unicaja/50" style={{ animation: 'dot-bounce 1.2s 300ms cubic-bezier(0.32,0.72,0,1) infinite' }} />
+              </div>
             </div>
           </div>
         )}
@@ -97,33 +103,51 @@ export default function ChatBox({ onChartData, hasChart }) {
             key={i}
             onClick={() => handleSend(s)}
             disabled={loading}
-            className="flex-none text-xs font-medium text-unicaja bg-white border border-unicaja/25 rounded-full px-3 py-1.5 hover:bg-unicaja hover:text-white hover:border-unicaja transition-all cursor-pointer disabled:opacity-40 whitespace-nowrap"
+            className="flex-none text-xs font-medium text-white/60 bg-white/5 border border-white/10
+              rounded-full px-3 py-1.5 whitespace-nowrap cursor-pointer
+              hover:bg-unicaja/15 hover:text-unicaja hover:border-unicaja/30
+              transition-all duration-300 ease-spring
+              disabled:opacity-30"
           >
             {s}
           </button>
         ))}
       </div>
 
-      {/* Input row */}
-      <div className="bg-white border-t border-gray-100 px-4 py-3 flex gap-2 flex-none">
-        <input
-          className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm text-gray-800 placeholder-gray-400 outline-none focus:ring-2 focus:ring-unicaja/20 focus:border-unicaja transition-all"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-          placeholder="Escribe tu consulta financiera..."
-          disabled={loading}
-        />
-        <button
-          onClick={() => handleSend()}
-          disabled={loading || !input.trim()}
-          className="bg-unicaja hover:bg-unicaja-dark text-white rounded-xl px-4 py-2.5 text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex items-center gap-1.5"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
-          </svg>
-          Enviar
-        </button>
+      {/* Input area */}
+      <div className="flex-none px-3 pb-3 pt-1">
+        <div className="bezel-outer">
+          <div className="bezel-inner rounded-[19px] px-3 py-2 flex gap-2 items-center">
+            <input
+              className="flex-1 bg-transparent border-none outline-none text-sm text-white/85
+                placeholder-white/25 caret-unicaja"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+              placeholder="Escribe tu consulta financiera..."
+              disabled={loading}
+            />
+            {/* Button-in-Button */}
+            <button
+              onClick={() => handleSend()}
+              disabled={loading || !input.trim()}
+              className="flex-none bg-unicaja/15 border border-unicaja/35 rounded-[14px] p-0.5
+                transition-all duration-300 ease-spring
+                hover:bg-unicaja/20 hover:border-unicaja/50
+                active:scale-[0.98]
+                disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+            >
+              <span className="flex items-center gap-1.5 bg-unicaja rounded-[12px] px-4 py-2
+                text-white text-sm font-semibold
+                transition-all duration-300 ease-spring">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                </svg>
+                Enviar
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )

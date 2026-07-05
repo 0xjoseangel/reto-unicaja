@@ -1,23 +1,144 @@
 @import "tailwindcss";
 
 @theme {
-  --color-unicaja: #00A651;
-  --color-unicaja-dark: #00843F;
+  --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+
+  --color-unicaja:       #00A651;
+  --color-unicaja-dark:  #00843F;
   --color-unicaja-light: #4CC87A;
-  --font-sans: 'Inter', system-ui, sans-serif;
+  --color-bg-base:       #050A08;
+
+  --color-text-primary:   rgba(255, 255, 255, 0.92);
+  --color-text-secondary: rgba(255, 255, 255, 0.48);
+  --color-text-tertiary:  rgba(255, 255, 255, 0.24);
+
+  --transition-timing-function-spring: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
-* {
+*, *::before, *::after {
   box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
   font-family: var(--font-sans);
-  height: 100vh;
-  overflow: hidden;
-  background: #F8FAFC;
+  background-color: #050A08;
+  background-image:
+    radial-gradient(ellipse 70% 50% at 12% 18%, rgba(0, 166, 81, 0.15) 0%, transparent 65%),
+    radial-gradient(ellipse 40% 28% at 88% 82%, rgba(0, 166, 81, 0.06) 0%, transparent 60%);
+  color: rgba(255, 255, 255, 0.92);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-#root {
-  height: 100vh;
+/* ── Double-Bezel System ───────────────────────────────────────── */
+.bezel-outer {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 1px;
 }
+
+.bezel-inner {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 19px;
+}
+
+.bezel-outer-lg {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 24px;
+  padding: 1px;
+}
+
+.bezel-inner-lg {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 23px;
+}
+
+.bezel-outer-accent {
+  background: rgba(0, 166, 81, 0.12);
+  border: 1px solid rgba(0, 166, 81, 0.25);
+  border-radius: 20px;
+  padding: 1px;
+}
+
+.bezel-inner-accent {
+  background: rgba(0, 166, 81, 0.08);
+  border: 1px solid rgba(0, 166, 81, 0.15);
+  border-radius: 19px;
+  background-image: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(0, 166, 81, 0.20) 0%, transparent 70%);
+}
+
+/* ── Floating Pill (navbar/header) ─────────────────────────────── */
+.floating-pill {
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 9999px;
+}
+
+/* ── Scroll entry animations ────────────────────────────────────── */
+@keyframes reveal-up {
+  from { opacity: 0; transform: translateY(20px); filter: blur(5px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0);   }
+}
+
+.animate-reveal {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.animate-reveal.is-visible {
+  animation: reveal-up 0.65s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
+.animate-reveal.is-visible[data-delay="100"] { animation-delay: 100ms; }
+.animate-reveal.is-visible[data-delay="200"] { animation-delay: 200ms; }
+.animate-reveal.is-visible[data-delay="300"] { animation-delay: 300ms; }
+.animate-reveal.is-visible[data-delay="400"] { animation-delay: 400ms; }
+
+/* ── Chat bubble entrance ───────────────────────────────────────── */
+@keyframes bubble-in {
+  from { opacity: 0; transform: scale(0.94) translateY(10px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0);    }
+}
+
+.bubble-animate {
+  animation: bubble-in 0.4s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
+/* ── Status glow pulse ──────────────────────────────────────────── */
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(0, 166, 81, 0.5); }
+  50%       { box-shadow: 0 0 0 5px rgba(0, 166, 81, 0);   }
+}
+
+.glow-pulse {
+  animation: glow-pulse 2.4s cubic-bezier(0.32, 0.72, 0, 1) infinite;
+}
+
+/* ── Loading dot bounce ─────────────────────────────────────────── */
+@keyframes dot-bounce {
+  0%, 80%, 100% { transform: translateY(0);    opacity: 0.5; }
+  40%           { transform: translateY(-5px); opacity: 1;   }
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.10); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.20); }
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar { display: none; }

@@ -14,7 +14,7 @@ import {
   YAxis,
 } from 'recharts'
 
-const COLORS = ['#00A651', '#10B981', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444', '#14B8A6', '#EC4899']
+const COLORS = ['#00A651', '#4CC87A', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444', '#14B8A6', '#EC4899']
 
 const formatEur = (value) =>
   typeof value === 'number'
@@ -24,9 +24,11 @@ const formatEur = (value) =>
 function CustomTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-white border border-gray-100 rounded-xl shadow-lg px-3 py-2 text-sm">
-      {label && <p className="text-gray-500 text-xs mb-1">{label}</p>}
-      <p className="font-semibold text-gray-800">{formatEur(payload[0].value)}</p>
+    <div className="bezel-outer text-sm" style={{ pointerEvents: 'none' }}>
+      <div className="bezel-inner rounded-[19px] px-3 py-2">
+        {label && <p className="text-white/40 text-xs mb-1">{label}</p>}
+        <p className="font-semibold text-white/90">{formatEur(payload[0].value)}</p>
+      </div>
     </div>
   )
 }
@@ -35,71 +37,82 @@ export default function ChartPanel({ chartType, chartData, chartTitle, onClose }
   if (!chartType || !chartData || chartData.length === 0) return null
 
   return (
-    <div className="mx-4 mt-4 bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
-      <div className="flex items-center justify-between mb-3">
-        {chartTitle && (
-          <h3 className="text-sm font-semibold text-gray-700">{chartTitle}</h3>
-        )}
-        {onClose && (
-          <button
-            onClick={onClose}
-            className="ml-auto text-gray-300 hover:text-gray-500 transition-colors text-lg leading-none cursor-pointer"
-            aria-label="Cerrar gráfico"
-          >
-            ×
-          </button>
-        )}
-      </div>
-
-      <ResponsiveContainer width="100%" height={220}>
-        {chartType === 'bar' ? (
-          <BarChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
-            <XAxis dataKey="name" tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} />
-            <YAxis tickFormatter={formatEur} tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
-            <Tooltip content={<CustomTooltip />} cursor={{ fill: '#F8FAFC' }} />
-            <Bar dataKey="value" fill="#00A651" radius={[6, 6, 0, 0]} maxBarSize={48} />
-          </BarChart>
-        ) : chartType === 'line' ? (
-          <LineChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
-            <XAxis dataKey="name" tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} />
-            <YAxis tickFormatter={formatEur} tick={{ fill: '#94A3B8', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
-            <Tooltip content={<CustomTooltip />} />
-            <Line
-              type="monotone"
-              dataKey="value"
-              stroke="#00A651"
-              strokeWidth={2.5}
-              dot={{ fill: '#00A651', r: 4, strokeWidth: 0 }}
-              activeDot={{ r: 6, fill: '#00A651' }}
-            />
-          </LineChart>
-        ) : (
-          <PieChart>
-            <Pie
-              data={chartData}
-              cx="50%"
-              cy="50%"
-              outerRadius={88}
-              innerRadius={44}
-              dataKey="value"
-              nameKey="name"
-              paddingAngle={2}
+    <div className="bezel-outer animate-reveal is-visible">
+      <div className="bezel-inner rounded-[19px] p-4">
+        <div className="flex items-center justify-between mb-3">
+          {chartTitle && (
+            <h3 className="text-sm font-semibold text-white/75">{chartTitle}</h3>
+          )}
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="ml-auto w-7 h-7 flex items-center justify-center
+                rounded-full bg-white/5 border border-white/[0.08] text-white/40
+                hover:bg-white/10 hover:text-white/70 text-lg leading-none
+                transition-all duration-300 ease-spring cursor-pointer"
+              aria-label="Cerrar gráfico"
             >
-              {chartData.map((_, i) => (
-                <Cell key={i} fill={COLORS[i % COLORS.length]} stroke="none" />
-              ))}
-            </Pie>
-            <Tooltip content={<CustomTooltip />} />
-            <Legend
-              iconType="circle"
-              iconSize={8}
-              wrapperStyle={{ color: '#64748B', fontSize: 11 }}
-            />
-          </PieChart>
-        )}
-      </ResponsiveContainer>
+              ×
+            </button>
+          )}
+        </div>
+
+        <ResponsiveContainer width="100%" height={200}>
+          {chartType === 'bar' ? (
+            <BarChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="barGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#4CC87A" stopOpacity={0.9} />
+                  <stop offset="100%" stopColor="#00A651" stopOpacity={0.7} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+              <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,0.38)', fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis tickFormatter={formatEur} tick={{ fill: 'rgba(255,255,255,0.38)', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
+              <Bar dataKey="value" fill="url(#barGradient)" radius={[6, 6, 0, 0]} maxBarSize={48} />
+            </BarChart>
+          ) : chartType === 'line' ? (
+            <LineChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+              <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,0.38)', fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis tickFormatter={formatEur} tick={{ fill: 'rgba(255,255,255,0.38)', fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+              <Tooltip content={<CustomTooltip />} />
+              <Line
+                type="monotone"
+                dataKey="value"
+                stroke="#4CC87A"
+                strokeWidth={2.5}
+                dot={{ fill: '#4CC87A', r: 4, strokeWidth: 0 }}
+                activeDot={{ r: 6, fill: '#4CC87A' }}
+              />
+            </LineChart>
+          ) : (
+            <PieChart>
+              <Pie
+                data={chartData}
+                cx="50%"
+                cy="50%"
+                outerRadius={80}
+                innerRadius={40}
+                dataKey="value"
+                nameKey="name"
+                paddingAngle={2}
+              >
+                {chartData.map((_, i) => (
+                  <Cell key={i} fill={COLORS[i % COLORS.length]} stroke="none" />
+                ))}
+              </Pie>
+              <Tooltip content={<CustomTooltip />} />
+              <Legend
+                iconType="circle"
+                iconSize={8}
+                wrapperStyle={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}
+              />
+            </PieChart>
+          )}
+        </ResponsiveContainer>
+      </div>
     </div>
   )
 }
