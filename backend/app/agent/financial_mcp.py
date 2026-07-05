@@ -409,3 +409,100 @@ def get_spending_analysis(user_id: int = 1) -> dict:
         return {"analisis": analysis, "meses_comparados": 11}
     finally:
         db.close()
+
+
+@mcp.tool()
+def make_bizum_transfer(
+    recipient: str,
+    amount: float,
+    concept: str = "Bizum",
+    user_id: int = 1,
+) -> dict:
+    """Ejecuta una transferencia Bizum desde la cuenta corriente del usuario.
+    Valida que haya saldo suficiente. Límite: 2000€ por operación.
+
+    IMPORTANTE: Antes de llamar a esta función DEBES haber confirmado con el
+    usuario el destinatario y el importe exacto.
+
+    Args:
+        recipient: Nombre o teléfono del destinatario.
+        amount: Cantidad en euros (debe ser > 0 y <= 2000).
+        concept: Concepto o motivo del Bizum.
+        user_id: ID del usuario.
+    """
+    if amount <= 0:
+        return {"success": False, "error": "El importe debe ser mayor que 0€."}
+    if amount > 2000:
+        return {"success": False, "error": "El límite por transferencia Bizum es 2000€."}
+
+    db = SessionLocal()
+    try:
+        account = db.query(Account).filter(
+            Account.user_id == user_id,
+            Account.account_type == "corriente",
+        ).first()
+
+        if not account:
+            return {"success": False, "error": "No se encontró cuenta corriente."}
+
+        if account.balance < amount:
+            return {
+                "success": False,
+                "error": (
+                    f"Saldo insuficiente. Tienes {round(account.balance, 2)}€ disponibles "
+                    f"y quieres enviar {round(amount, 2)}€."
+                ),
+                "saldo_disponible": round(account.balance, 2),
+            }
+
+        account.balance = round(account.balance - amount, 2)
+        transaction = Transaction(
+            account_id=account.id,
+            amount=round(amount, 2),
+            transaction_type="gasto",
+            category="bizum",
+            description=f"Bizum a {recipient} — {concept}",
+            date=datetime.now(),
+        )
+        db.add(transaction)
+        db.commit()
+        db.refresh(transaction)
+
+        return {
+            "success": True,
+            "destinatario": recipient,
+            "importe": round(amount, 2),
+            "concepto": concept,
+            "nuevo_saldo": account.balance,
+            "fecha": transaction.date.strftime("%Y-%m-%d %H:%M"),
+        }
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_bizum_history(limit: int = 10, user_id: int = 1) -> dict:
+    """Obtiene el historial de transferencias Bizum realizadas por el usuario."""
+    db = SessionLocal()
+    try:
+        ids = _account_ids(db, user_id)
+        rows = db.query(Transaction).filter(
+            Transaction.account_id.in_(ids),
+            Transaction.category == "bizum",
+        ).order_by(Transaction.date.desc()).limit(limit).all()
+
+        return {
+            "bizum_transfers": [
+                {
+                    "fecha": r.date.strftime("%Y-%m-%d %H:%M"),
+                    "descripcion": r.description,
+                    "importe": round(r.amount, 2),
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        db.close()

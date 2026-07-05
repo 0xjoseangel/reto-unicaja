@@ -16,6 +16,7 @@ import json
 from groq import Groq
 
 from app.agent.financial_mcp import (
+    get_bizum_history,
     get_category_breakdown,
     get_expenses_by_category,
     get_financial_summary,
@@ -25,6 +26,7 @@ from app.agent.financial_mcp import (
     get_recent_transactions,
     get_spending_analysis,
     get_transaction_count,
+    make_bizum_transfer,
     search_specific_transactions,
 )
 from app.core.config import settings
@@ -48,6 +50,12 @@ Guía de herramientas:
 - search_specific_transactions → busca por nombre de comercio (ej: "Netflix", "Zara")
 - get_recent_transactions      → últimos movimientos cronológicos
 - get_largest_expenses         → gastos individuales más grandes en un período
+- make_bizum_transfer          → envía un Bizum; SIEMPRE pide confirmación antes de ejecutar
+- get_bizum_history            → historial de Bizums enviados
+
+Regla para Bizum: cuando el usuario pida enviar un Bizum, primero responde con los
+detalles (destinatario, importe, concepto) y pregunta "¿Confirmas el envío?". Solo
+llama a make_bizum_transfer cuando el usuario haya confirmado explícitamente.
 """
 
 FINAL_PROMPT = """Ahora genera la respuesta final en JSON con esta estructura exacta:
@@ -216,6 +224,41 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "make_bizum_transfer",
+            "description": (
+                "Ejecuta una transferencia Bizum desde la cuenta corriente del usuario. "
+                "IMPORTANTE: DEBES confirmar con el usuario el destinatario y el importe "
+                "ANTES de llamar a esta función. Si no hay confirmación explícita, pregunta primero."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {"type": "string", "description": "Nombre o teléfono del destinatario."},
+                    "amount": {"type": "number", "description": "Cantidad en euros. Máximo 2000€."},
+                    "concept": {"type": "string", "description": "Concepto o motivo del Bizum."},
+                    "user_id": {"type": "integer"},
+                },
+                "required": ["recipient", "amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_bizum_history",
+            "description": "Historial de transferencias Bizum realizadas por el usuario.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer"},
+                    "user_id": {"type": "integer"},
+                },
+            },
+        },
+    },
 ]
 
 TOOL_MAP = {
@@ -229,6 +272,8 @@ TOOL_MAP = {
     "search_specific_transactions": search_specific_transactions,
     "get_recent_transactions": get_recent_transactions,
     "get_largest_expenses": get_largest_expenses,
+    "make_bizum_transfer": make_bizum_transfer,
+    "get_bizum_history": get_bizum_history,
 }
 
 
