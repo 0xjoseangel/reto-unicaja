@@ -1,4 +1,20 @@
 services:
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - app_network
+
   backend:
     build: ./backend
     ports:
@@ -10,6 +26,11 @@ services:
       - ./backend/.env
     environment:
       - DATABASE_URL=sqlite:////app/data/db.sqlite3
+      - AI_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      - OLLAMA_MODEL=qwen2.5:7b
+    depends_on:
+      - ollama
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - app_network
@@ -30,6 +51,7 @@ services:
 
 volumes:
   sqlite_data:
+  ollama_data:
 
 networks:
   app_network:

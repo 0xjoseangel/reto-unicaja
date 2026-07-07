@@ -64,6 +64,19 @@ def get_financial_summary(user_id: int = 1) -> dict:
             Transaction.transaction_type == "gasto",
         ).scalar() or 0.0
 
+        # Período cubierto por los datos
+        first = db.query(func.min(Transaction.date)).filter(
+            Transaction.account_id.in_(ids),
+        ).scalar()
+        last = db.query(func.max(Transaction.date)).filter(
+            Transaction.account_id.in_(ids),
+        ).scalar()
+
+        months = 1
+        if first and last:
+            delta = (last.year - first.year) * 12 + (last.month - first.month) + 1
+            months = max(delta, 1)
+
         top = db.query(
             Transaction.category,
             func.sum(Transaction.amount).label("total"),
@@ -78,7 +91,11 @@ def get_financial_summary(user_id: int = 1) -> dict:
             "balance": balance,
             "total_income": round(income, 2),
             "total_expenses": round(expenses, 2),
+            "periodo_meses": months,
+            "ingreso_mensual_promedio": round(income / months, 2),
+            "gasto_mensual_promedio": round(expenses / months, 2),
             "top_categories": [{"category": c, "total": round(t, 2)} for c, t in top],
+            "nota": f"Los totales cubren {months} meses de historial.",
         }
     finally:
         db.close()
@@ -481,6 +498,241 @@ def make_bizum_transfer(
         return {"success": False, "error": str(e)}
     finally:
         db.close()
+
+
+@mcp.tool()
+def calculate_mortgage(
+    property_price: float,
+    deposit: float,
+    annual_rate_percent: float,
+    years: int,
+) -> dict:
+    """
+    Calcula la cuota mensual de una hipoteca y genera la tabla de amortización anual.
+    Usa este tool SIEMPRE que el usuario pregunte por hipotecas, préstamos o cuotas.
+    No hagas los cálculos tú mismo.
+
+    Args:
+        property_price: Precio total del inmueble en euros.
+        deposit: Entrada inicial (señal) en euros.
+        annual_rate_percent: Tipo de interés anual en porcentaje (ej: 4.0 para 4%).
+        years: Plazo en años.
+    """
+    principal = property_price - deposit
+    if principal <= 0:
+        return {"error": "La entrada es mayor o igual al precio del inmueble."}
+    if annual_rate_percent <= 0 or years <= 0:
+        return {"error": "El tipo de interés y el plazo deben ser mayores que cero."}
+
+    monthly_rate = annual_rate_percent / 100 / 12
+    n_payments = years * 12
+
+    # Fórmula de cuota fija (sistema francés)
+    factor = (1 + monthly_rate) ** n_payments
+    monthly_payment = principal * monthly_rate * factor / (factor - 1)
+
+    # Tabla de amortización año a año
+    amortization = []
+    balance = principal
+    for year in range(1, years + 1):
+        year_interest = 0.0
+        year_capital = 0.0
+        for _ in range(12):
+            interest = balance * monthly_rate
+            capital = monthly_payment - interest
+            year_interest += interest
+            year_capital += capital
+            balance -= capital
+            if balance < 0:
+                balance = 0.0
+        amortization.append({
+            "año": year,
+            "cuota_anual": round(monthly_payment * 12, 2),
+            "intereses": round(year_interest, 2),
+            "capital_amortizado": round(year_capital, 2),
+            "capital_pendiente": round(max(balance, 0), 2),
+        })
+
+    total_pagado = round(monthly_payment * n_payments, 2)
+    total_intereses = round(total_pagado - principal, 2)
+
+    return {
+        "principal": round(principal, 2),
+        "cuota_mensual": round(monthly_payment, 2),
+        "total_pagado": total_pagado,
+        "total_intereses": total_intereses,
+        "tabla_amortizacion": amortization,
+    }
+
+
+@mcp.tool()
+def calculate_loan(
+    principal: float,
+    annual_rate_percent: float,
+    years: int,
+) -> dict:
+    """
+    Calcula la cuota mensual de un préstamo personal o cualquier financiación
+    (sin precio de inmueble). Úsalo para préstamos de coche, personal, etc.
+    Nunca hagas este cálculo tú mismo.
+
+    Args:
+        principal: Capital prestado en euros.
+        annual_rate_percent: Tipo de interés anual en % (ej: 6.5).
+        years: Plazo en años.
+    """
+    if principal <= 0 or annual_rate_percent <= 0 or years <= 0:
+        return {"error": "Todos los valores deben ser mayores que cero."}
+
+    monthly_rate = annual_rate_percent / 100 / 12
+    n = years * 12
+    factor = (1 + monthly_rate) ** n
+    monthly_payment = principal * monthly_rate * factor / (factor - 1)
+    total_pagado = monthly_payment * n
+    total_intereses = total_pagado - principal
+
+    return {
+        "capital": round(principal, 2),
+        "cuota_mensual": round(monthly_payment, 2),
+        "total_pagado": round(total_pagado, 2),
+        "total_intereses": round(total_intereses, 2),
+        "plazo_meses": n,
+    }
+
+
+@mcp.tool()
+def calculate_compound_interest(
+    initial_amount: float,
+    monthly_contribution: float,
+    annual_rate_percent: float,
+    years: int,
+) -> dict:
+    """
+    Calcula el resultado de un ahorro o inversión con interés compuesto,
+    con o sin aportaciones mensuales. Úsalo para preguntas como
+    "si ahorro X€/mes durante Y años al Z%, ¿cuánto tendré?".
+    Nunca hagas este cálculo tú mismo.
+
+    Args:
+        initial_amount: Capital inicial en euros (puede ser 0).
+        monthly_contribution: Aportación mensual en euros (puede ser 0).
+        annual_rate_percent: Rentabilidad anual esperada en % (ej: 4.0).
+        years: Horizonte temporal en años.
+    """
+    monthly_rate = annual_rate_percent / 100 / 12
+    n = years * 12
+    balance = initial_amount
+
+    yearly = []
+    for year in range(1, years + 1):
+        for _ in range(12):
+            balance = balance * (1 + monthly_rate) + monthly_contribution
+        yearly.append({"año": year, "saldo": round(balance, 2)})
+
+    total_aportado = initial_amount + monthly_contribution * n
+    ganancia = balance - total_aportado
+
+    return {
+        "saldo_final": round(balance, 2),
+        "total_aportado": round(total_aportado, 2),
+        "ganancia_por_interes": round(ganancia, 2),
+        "evolucion_anual": yearly,
+    }
+
+
+@mcp.tool()
+def calculate_investment_return(
+    initial_value: float,
+    final_value: float,
+    years: float,
+) -> dict:
+    """
+    Calcula la rentabilidad anual (CAGR) de una inversión dado el valor
+    inicial, el valor final y el tiempo transcurrido.
+    Úsalo para preguntas como "compré un fondo a X€ hace Y años, ahora vale Z€,
+    ¿qué rentabilidad me ha dado?". Nunca hagas este cálculo tú mismo.
+
+    Args:
+        initial_value: Valor inicial de la inversión en euros.
+        final_value: Valor actual o final de la inversión en euros.
+        years: Años transcurridos (puede ser decimal, ej: 2.5).
+    """
+    if initial_value <= 0 or final_value <= 0 or years <= 0:
+        return {"error": "Todos los valores deben ser mayores que cero."}
+
+    cagr = ((final_value / initial_value) ** (1 / years) - 1) * 100
+    ganancia_total = final_value - initial_value
+    rentabilidad_total = (ganancia_total / initial_value) * 100
+
+    return {
+        "rentabilidad_anual_cagr": round(cagr, 2),
+        "rentabilidad_total": round(rentabilidad_total, 2),
+        "ganancia_euros": round(ganancia_total, 2),
+    }
+
+
+@mcp.tool()
+def calculate_savings_goal(
+    goal_amount: float,
+    monthly_savings: float,
+    annual_rate_percent: float = 0.0,
+) -> dict:
+    """
+    Calcula cuánto tiempo se tarda en alcanzar un objetivo de ahorro
+    guardando una cantidad fija al mes, con o sin rentabilidad.
+    Úsalo para preguntas como "¿cuánto tardo en ahorrar X€ guardando Y€/mes?".
+    Nunca hagas este cálculo tú mismo.
+
+    Args:
+        goal_amount: Objetivo de ahorro en euros.
+        monthly_savings: Cantidad que se ahorra cada mes en euros.
+        annual_rate_percent: Rentabilidad anual en % (0 si es cuenta sin intereses).
+    """
+    if monthly_savings <= 0:
+        return {"error": "El ahorro mensual debe ser mayor que cero."}
+    if goal_amount <= 0:
+        return {"error": "El objetivo debe ser mayor que cero."}
+
+    monthly_rate = annual_rate_percent / 100 / 12
+
+    if monthly_rate == 0:
+        months = goal_amount / monthly_savings
+    else:
+        import math
+        months = math.log(1 + goal_amount * monthly_rate / monthly_savings) / math.log(1 + monthly_rate)
+
+    years = int(months // 12)
+    remaining_months = round(months % 12)
+
+    return {
+        "meses_totales": round(months),
+        "años": years,
+        "meses_adicionales": remaining_months,
+        "descripcion": f"{years} años y {remaining_months} meses" if years > 0 else f"{round(months)} meses",
+    }
+
+
+@mcp.tool()
+def calculate_budget_distribution(monthly_income: float) -> dict:
+    """
+    Aplica la regla 50/30/20 para distribuir los ingresos mensuales:
+    50% necesidades, 30% ocio, 20% ahorro.
+    Úsalo cuando el usuario pregunte cómo distribuir su sueldo o presupuesto.
+    Nunca hagas este cálculo tú mismo.
+
+    Args:
+        monthly_income: Ingresos mensuales netos en euros.
+    """
+    if monthly_income <= 0:
+        return {"error": "Los ingresos deben ser mayores que cero."}
+
+    return {
+        "ingresos_mensuales": round(monthly_income, 2),
+        "necesidades_50pct": round(monthly_income * 0.50, 2),
+        "ocio_30pct": round(monthly_income * 0.30, 2),
+        "ahorro_20pct": round(monthly_income * 0.20, 2),
+        "descripcion": "Regla 50/30/20: necesidades / ocio / ahorro",
+    }
 
 
 @mcp.tool()

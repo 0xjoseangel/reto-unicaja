@@ -13,9 +13,15 @@ como tool y aprovecha el JSON mode nativo de Groq.
 import asyncio
 import json
 
-from groq import Groq
+from openai import OpenAI
 
 from app.agent.financial_mcp import (
+    calculate_budget_distribution,
+    calculate_compound_interest,
+    calculate_investment_return,
+    calculate_loan,
+    calculate_mortgage,
+    calculate_savings_goal,
     get_bizum_history,
     get_category_breakdown,
     get_expenses_by_category,
@@ -52,6 +58,15 @@ Guía de herramientas:
 - get_largest_expenses         → gastos individuales más grandes en un período
 - make_bizum_transfer          → envía un Bizum; SIEMPRE pide confirmación antes de ejecutar
 - get_bizum_history            → historial de Bizums enviados
+- calculate_mortgage           → cuota mensual + amortización de hipoteca (con precio de inmueble)
+- calculate_loan               → cuota mensual de préstamo personal, coche, etc.
+- calculate_compound_interest  → proyección de ahorro/inversión con interés compuesto
+- calculate_investment_return  → rentabilidad anual (CAGR) de una inversión pasada
+- calculate_savings_goal       → tiempo necesario para alcanzar un objetivo de ahorro
+- calculate_budget_distribution → distribuye ingresos con la regla 50/30/20
+
+IMPORTANTE: para CUALQUIER cálculo numérico financiero usa SIEMPRE la herramienta
+correspondiente. Nunca hagas matemáticas tú mismo: los errores de cálculo son inaceptables.
 
 Regla para Bizum: cuando el usuario pida enviar un Bizum, primero responde con los
 detalles (destinatario, importe, concepto) y pregunta "¿Confirmas el envío?". Solo
@@ -279,6 +294,102 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_mortgage",
+            "description": "Cuota mensual y amortización de hipoteca. Úsalo SIEMPRE para hipotecas. Nunca calcules tú mismo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "property_price": {"type": "number", "description": "Precio total del inmueble en euros."},
+                    "deposit": {"type": "number", "description": "Entrada inicial en euros."},
+                    "annual_rate_percent": {"type": "number", "description": "Tipo de interés anual en % (ej: 4.0)."},
+                    "years": {"type": "integer", "description": "Plazo en años."},
+                },
+                "required": ["property_price", "deposit", "annual_rate_percent", "years"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_loan",
+            "description": "Cuota mensual de préstamo personal, coche u otra financiación sin inmueble. Nunca calcules tú mismo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "principal": {"type": "number", "description": "Capital prestado en euros."},
+                    "annual_rate_percent": {"type": "number", "description": "Tipo de interés anual en %."},
+                    "years": {"type": "integer", "description": "Plazo en años."},
+                },
+                "required": ["principal", "annual_rate_percent", "years"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_compound_interest",
+            "description": "Proyección de ahorro o inversión con interés compuesto y aportaciones mensuales. Nunca calcules tú mismo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "initial_amount": {"type": "number", "description": "Capital inicial en euros (puede ser 0)."},
+                    "monthly_contribution": {"type": "number", "description": "Aportación mensual en euros (puede ser 0)."},
+                    "annual_rate_percent": {"type": "number", "description": "Rentabilidad anual esperada en %."},
+                    "years": {"type": "integer", "description": "Horizonte temporal en años."},
+                },
+                "required": ["initial_amount", "monthly_contribution", "annual_rate_percent", "years"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_investment_return",
+            "description": "Calcula la rentabilidad anual (CAGR) de una inversión pasada. Nunca calcules tú mismo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "initial_value": {"type": "number", "description": "Valor inicial de la inversión en euros."},
+                    "final_value": {"type": "number", "description": "Valor actual o final en euros."},
+                    "years": {"type": "number", "description": "Años transcurridos (puede ser decimal)."},
+                },
+                "required": ["initial_value", "final_value", "years"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_savings_goal",
+            "description": "Tiempo necesario para ahorrar una cantidad fija guardando X€/mes. Nunca calcules tú mismo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal_amount": {"type": "number", "description": "Objetivo de ahorro en euros."},
+                    "monthly_savings": {"type": "number", "description": "Ahorro mensual en euros."},
+                    "annual_rate_percent": {"type": "number", "description": "Rentabilidad anual en % (0 si no hay intereses)."},
+                },
+                "required": ["goal_amount", "monthly_savings"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_budget_distribution",
+            "description": "Distribuye ingresos mensuales con la regla 50/30/20 (necesidades/ocio/ahorro). Nunca calcules tú mismo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "monthly_income": {"type": "number", "description": "Ingresos mensuales netos en euros."},
+                },
+                "required": ["monthly_income"],
+            },
+        },
+    },
 ]
 
 TOOL_MAP = {
@@ -294,13 +405,31 @@ TOOL_MAP = {
     "get_largest_expenses": get_largest_expenses,
     "make_bizum_transfer": make_bizum_transfer,
     "get_bizum_history": get_bizum_history,
+    "calculate_mortgage": calculate_mortgage,
+    "calculate_loan": calculate_loan,
+    "calculate_compound_interest": calculate_compound_interest,
+    "calculate_investment_return": calculate_investment_return,
+    "calculate_savings_goal": calculate_savings_goal,
+    "calculate_budget_distribution": calculate_budget_distribution,
 }
 
 
 # ── Bucle agente ──────────────────────────────────────────────────────────────
 
+def _build_client() -> tuple[OpenAI, str]:
+    if settings.ai_provider == "ollama":
+        client = OpenAI(base_url=settings.ollama_base_url, api_key="ollama")
+        return client, settings.ollama_model
+    # groq — usa el endpoint OpenAI-compatible
+    client = OpenAI(
+        base_url="https://api.groq.com/openai/v1",
+        api_key=settings.groq_api_key,
+    )
+    return client, "llama-3.3-70b-versatile"
+
+
 def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
-    client = Groq(api_key=settings.groq_api_key)
+    client, model = _build_client()
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -314,7 +443,7 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
     for _ in range(7):
         try:
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=model,
                 messages=messages,
                 tools=TOOLS_SCHEMA,
                 tool_choice="auto",
@@ -369,7 +498,7 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
     messages.append({"role": "user", "content": FINAL_PROMPT})
 
     final_response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=model,
         messages=messages,
         response_format={"type": "json_object"},
     )
@@ -433,7 +562,7 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
 
 
 async def process_chat(message: str, user_id: int = 1, history: list[dict] | None = None) -> ChatResponse:
-    if not settings.groq_api_key:
+    if settings.ai_provider == "groq" and not settings.groq_api_key:
         return ChatResponse(
             response="API key de Groq no configurada. Añade GROQ_API_KEY al archivo backend/.env"
         )

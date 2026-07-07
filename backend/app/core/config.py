@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     groq_api_key: str = ""
 
+    # Proveedor de IA: "groq" | "ollama"
+    ai_provider: str = "groq"
+    ollama_base_url: str = "http://ollama:11434/v1"
+    ollama_model: str = "qwen2.5:7b"
+
     class Config:
         env_file = ".env"
 
