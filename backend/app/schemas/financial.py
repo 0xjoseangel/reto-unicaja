@@ -49,8 +49,16 @@ class ChatRequest(BaseModel):
     history: list[HistoryMessage] = []
 
 
+class PendingBizumAction(BaseModel):
+    type: Literal["bizum_confirm"]
+    recipient: str
+    amount: float
+    concept: str
+
+
 class ChatResponse(BaseModel):
     response: str
     chart_type: Literal["bar", "line", "pie"] | None = None
     chart_data: list[ChartDataPoint] | None = None
     chart_title: str | None = None
+    pending_action: PendingBizumAction | None = None

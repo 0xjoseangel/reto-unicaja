@@ -30,7 +30,7 @@ from app.agent.financial_mcp import (
     search_specific_transactions,
 )
 from app.core.config import settings
-from app.schemas.financial import ChatResponse, ChartDataPoint
+from app.schemas.financial import ChatResponse, ChartDataPoint, PendingBizumAction
 
 SYSTEM_PROMPT = """Eres un asistente financiero personal que responde siempre en español.
 
@@ -63,7 +63,8 @@ FINAL_PROMPT = """Ahora genera la respuesta final en JSON con esta estructura ex
   "response_text": "respuesta amigable en español para el usuario",
   "chart_type": "bar | line | pie | none",
   "chart_data": "[{\\"name\\":\\"X\\",\\"value\\":0}]",
-  "chart_title": "título descriptivo del gráfico, o vacío si no hay gráfico"
+  "chart_title": "título descriptivo del gráfico, o vacío si no hay gráfico",
+  "pending_action": null
 }
 
 Guía chart_type:
@@ -73,6 +74,25 @@ Guía chart_type:
 - "none" → solo texto (listas de lugares, análisis, respuestas simples)
 
 chart_data es un string JSON array. Si chart_type es "none" usa chart_data="[]".
+
+En "response_text" usa Markdown enriquecido:
+- **negrita** para cifras y datos clave
+- listas con viñetas (-) o numeradas cuando hay múltiples items
+- tablas Markdown si hay datos comparativos
+- `código` para valores monetarios exactos si procede
+No uses markdown en chart_title.
+
+CASO ESPECIAL — Confirmación de Bizum:
+Si el usuario quiere enviar un Bizum pero aún no has ejecutado make_bizum_transfer
+(es decir, necesitas confirmación), usa "pending_action" con este formato en lugar de preguntar por texto:
+{
+  "pending_action": {"type": "bizum_confirm", "recipient": "Nombre", "amount": 50.0, "concept": "Concepto"},
+  "response_text": "",
+  "chart_type": "none",
+  "chart_data": "[]",
+  "chart_title": ""
+}
+Cuando ya hayas ejecutado make_bizum_transfer, pon pending_action=null y describe el resultado en response_text.
 """
 
 # ── Definición de tools en formato OpenAI ────────────────────────────────────
@@ -390,11 +410,25 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
 
     chart_data = normalized or None
 
+    pending_action = None
+    raw_pending = data.get("pending_action")
+    if isinstance(raw_pending, dict) and raw_pending.get("type") == "bizum_confirm":
+        try:
+            pending_action = PendingBizumAction(
+                type="bizum_confirm",
+                recipient=str(raw_pending["recipient"]),
+                amount=float(raw_pending["amount"]),
+                concept=str(raw_pending.get("concept", "Bizum")),
+            )
+        except (KeyError, ValueError, TypeError):
+            pass
+
     return ChatResponse(
         response=data.get("response_text", ""),
         chart_type=chart_type if chart_type != "none" else None,
         chart_data=chart_data,
         chart_title=chart_title,
+        pending_action=pending_action,
     )
 
 

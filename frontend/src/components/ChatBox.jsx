@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { sendChatMessage } from '../services/api'
 import InlineChart from './InlineChart'
+import BizumConfirmModal from './BizumConfirmModal'
 
 const SUGGESTIONS = [
   '¿Cuál es mi saldo actual?',
@@ -20,6 +23,7 @@ export default function ChatBox() {
   const [history, setHistory] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [pendingBizum, setPendingBizum] = useState(null)
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -39,6 +43,14 @@ export default function ChatBox() {
 
     try {
       const data = await sendChatMessage(message, updatedHistory)
+
+      if (data.pending_action?.type === 'bizum_confirm') {
+        setPendingBizum(data.pending_action)
+        setHistory(updatedHistory)
+        setLoading(false)
+        return
+      }
+
       const newMessages = [{ role: 'assistant', text: data.response }]
 
       if (data.chart_type && data.chart_data) {
@@ -53,7 +65,6 @@ export default function ChatBox() {
       }
 
       setMessages((prev) => [...prev, ...newMessages])
-      // Guardar en el historial: mensaje del usuario + respuesta del asistente
       setHistory([...updatedHistory, { role: 'assistant', content: data.response }])
     } catch {
       setMessages((prev) => [
@@ -65,8 +76,30 @@ export default function ChatBox() {
     }
   }
 
+  function handleBizumConfirm() {
+    const { recipient, amount, concept } = pendingBizum
+    setPendingBizum(null)
+    handleSend(`Sí, confirma el Bizum de ${amount}€ a ${recipient} por ${concept}`)
+  }
+
+  function handleBizumCancel() {
+    setPendingBizum(null)
+    setMessages((prev) => [...prev, { role: 'assistant', text: 'Bizum cancelado.' }])
+  }
+
   return (
-    <div className="flex flex-col h-full bg-transparent">
+    <div className="flex flex-col h-full bg-transparent relative">
+      {/* Bizum confirmation modal */}
+      {pendingBizum && (
+        <BizumConfirmModal
+          recipient={pendingBizum.recipient}
+          amount={pendingBizum.amount}
+          concept={pendingBizum.concept}
+          onConfirm={handleBizumConfirm}
+          onCancel={handleBizumCancel}
+        />
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
         {messages.map((msg, i) => {
@@ -97,8 +130,8 @@ export default function ChatBox() {
                 </div>
               ) : (
                 <div className="bezel-outer max-w-[75%] bubble-animate">
-                  <div className="bezel-inner rounded-[19px] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line text-white/85">
-                    {msg.text}
+                  <div className="bezel-inner rounded-[19px] px-4 py-2.5 text-sm leading-relaxed text-white/85 prose-chat">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
                   </div>
                 </div>
               )}
