@@ -1,31 +1,32 @@
 """
-Agente conversacional usando Groq (llama-3.3-70b-versatile) con tool calling.
+Agente conversacional multi-proveedor (Claude / Ollama / Groq) con tool calling.
 
 Flujo en dos fases:
   Fase 1 — El modelo llama tools de datos (SQLite) en un bucle hasta tener toda
             la información que necesita.
-  Fase 2 — Se le pide una respuesta estructurada en JSON (response_format json_object)
-            con el texto de respuesta y los datos para el gráfico.
-
-Separar las dos fases evita problemas de validación de Llama con present_answer
-como tool y aprovecha el JSON mode nativo de Groq.
+  Fase 2 — Se le pide una respuesta estructurada en JSON con el texto de respuesta
+            y los datos para el gráfico. Claude no soporta response_format json_object
+            así que se usa FINAL_PROMPT con instrucción explícita de devolver JSON.
 """
 import asyncio
+import inspect
 import json
+import os
 
-from openai import OpenAI
+import litellm
 
 from app.agent.financial_mcp import (
     calculate_budget_distribution,
     calculate_compound_interest,
-    calculate_investment_return,
     calculate_loan,
     calculate_mortgage,
     calculate_savings_goal,
+    get_account_balances,
     get_bizum_history,
     get_category_breakdown,
     get_expenses_by_category,
     get_financial_summary,
+    get_income_by_period,
     get_largest_expenses,
     get_monthly_evolution,
     get_places_by_category,
@@ -46,11 +47,13 @@ Cuando el usuario haga una pregunta:
 2. Cuando tengas toda la información, responde con un JSON estructurado.
 
 Guía de herramientas:
-- get_financial_summary        → resumen general (saldo, ingresos, gastos totales)
-- get_expenses_by_category     → total gastado en una categoría concreta
+- get_financial_summary        → resumen general (saldo total, ingresos totales, gastos totales)
+- get_account_balances         → saldo de cada cuenta por separado (corriente vs ahorro)
+- get_income_by_period         → ingresos en un período concreto ("¿cuánto cobré este mes?")
+- get_expenses_by_category     → total gastado en una categoría en un período
 - get_monthly_evolution        → evolución mes a mes de una categoría
 - get_category_breakdown       → desglose de TODAS las categorías en un período
-- get_transaction_count        → número de transacciones (visitas/compras)
+- get_transaction_count        → número de transacciones en un período
 - get_places_by_category       → establecimientos concretos visitados (ej: "¿a qué restaurantes he ido?")
 - get_spending_analysis        → análisis de si el usuario gasta demasiado comparado con su promedio
 - search_specific_transactions → busca por nombre de comercio (ej: "Netflix", "Zara")
@@ -61,16 +64,20 @@ Guía de herramientas:
 - calculate_mortgage           → cuota mensual + amortización de hipoteca (con precio de inmueble)
 - calculate_loan               → cuota mensual de préstamo personal, coche, etc.
 - calculate_compound_interest  → proyección de ahorro/inversión con interés compuesto
-- calculate_investment_return  → rentabilidad anual (CAGR) de una inversión pasada
 - calculate_savings_goal       → tiempo necesario para alcanzar un objetivo de ahorro
 - calculate_budget_distribution → distribuye ingresos con la regla 50/30/20
 
 IMPORTANTE: para CUALQUIER cálculo numérico financiero usa SIEMPRE la herramienta
 correspondiente. Nunca hagas matemáticas tú mismo: los errores de cálculo son inaceptables.
 
-Regla para Bizum: cuando el usuario pida enviar un Bizum, primero responde con los
-detalles (destinatario, importe, concepto) y pregunta "¿Confirmas el envío?". Solo
-llama a make_bizum_transfer cuando el usuario haya confirmado explícitamente.
+Regla para Bizum:
+- Cuando el usuario PIDA enviar un Bizum, devuelve pending_action (no llames a make_bizum_transfer todavía).
+- SOLO llama a make_bizum_transfer cuando el mensaje actual del usuario sea una confirmación
+  explícita del tipo "Sí, confirma el Bizum de X€ a Y por Z".
+- Si el usuario hace una PREGUNTA sobre un Bizum ya enviado (empieza por "por qué", "porque",
+  "cuándo", "qué", "cómo", etc.) NO envíes otro Bizum. Limítate a explicar.
+- Si el resultado de make_bizum_transfer incluye "nuevo_saldo_total", usa ESE valor como saldo
+  actualizado del usuario (no "nuevo_saldo_cuenta_corriente").
 """
 
 FINAL_PROMPT = """Ahora genera la respuesta final en JSON con esta estructura exacta:
@@ -108,6 +115,8 @@ Si el usuario quiere enviar un Bizum pero aún no has ejecutado make_bizum_trans
   "chart_title": ""
 }
 Cuando ya hayas ejecutado make_bizum_transfer, pon pending_action=null y describe el resultado en response_text.
+
+IMPORTANTE: Responde ÚNICAMENTE con el JSON. Sin texto adicional, sin bloques de código markdown.
 """
 
 # ── Definición de tools en formato OpenAI ────────────────────────────────────
@@ -123,8 +132,30 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_financial_summary",
-            "description": "Resumen financiero: saldo total, ingresos, gastos y top categorías.",
+            "description": "Resumen financiero: saldo total de todas las cuentas, ingresos totales históricos, gastos totales históricos y top categorías.",
             "parameters": {"type": "object", "properties": {"user_id": {"type": "integer"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_account_balances",
+            "description": "Saldo de cada cuenta por separado (corriente, ahorro, etc.) y saldo total. Úsalo cuando el usuario pregunte por una cuenta específica o cuando necesites distinguir entre cuentas.",
+            "parameters": {"type": "object", "properties": {"user_id": {"type": "integer"}}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_income_by_period",
+            "description": "Ingresos del usuario en un período concreto (nómina, freelance, etc.). Úsalo para '¿cuánto he cobrado este mes?', '¿cuál es mi salario?', '¿cuánto ingresé el mes pasado?'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string", "enum": _PERIOD},
+                    "user_id": {"type": "integer"},
+                },
+            },
         },
     },
     {
@@ -347,22 +378,6 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "calculate_investment_return",
-            "description": "Calcula la rentabilidad anual (CAGR) de una inversión pasada. Nunca calcules tú mismo.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "initial_value": {"type": "number", "description": "Valor inicial de la inversión en euros."},
-                    "final_value": {"type": "number", "description": "Valor actual o final en euros."},
-                    "years": {"type": "number", "description": "Años transcurridos (puede ser decimal)."},
-                },
-                "required": ["initial_value", "final_value", "years"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "calculate_savings_goal",
             "description": "Tiempo necesario para ahorrar una cantidad fija guardando X€/mes. Nunca calcules tú mismo.",
             "parameters": {
@@ -394,6 +409,8 @@ TOOLS_SCHEMA = [
 
 TOOL_MAP = {
     "get_financial_summary": get_financial_summary,
+    "get_account_balances": get_account_balances,
+    "get_income_by_period": get_income_by_period,
     "get_expenses_by_category": get_expenses_by_category,
     "get_monthly_evolution": get_monthly_evolution,
     "get_category_breakdown": get_category_breakdown,
@@ -408,28 +425,29 @@ TOOL_MAP = {
     "calculate_mortgage": calculate_mortgage,
     "calculate_loan": calculate_loan,
     "calculate_compound_interest": calculate_compound_interest,
-    "calculate_investment_return": calculate_investment_return,
     "calculate_savings_goal": calculate_savings_goal,
     "calculate_budget_distribution": calculate_budget_distribution,
 }
 
 
+# ── Cliente litellm ───────────────────────────────────────────────────────────
+
+def _build_model() -> str:
+    if settings.ai_provider == "claude":
+        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+        return f"anthropic/{settings.claude_model}"
+    if settings.ai_provider == "ollama":
+        os.environ["OLLAMA_API_BASE"] = settings.ollama_base_url
+        return f"ollama/{settings.ollama_model}"
+    # groq (legado)
+    os.environ["GROQ_API_KEY"] = settings.groq_api_key
+    return "groq/llama-3.3-70b-versatile"
+
+
 # ── Bucle agente ──────────────────────────────────────────────────────────────
 
-def _build_client() -> tuple[OpenAI, str]:
-    if settings.ai_provider == "ollama":
-        client = OpenAI(base_url=settings.ollama_base_url, api_key="ollama")
-        return client, settings.ollama_model
-    # groq — usa el endpoint OpenAI-compatible
-    client = OpenAI(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=settings.groq_api_key,
-    )
-    return client, "llama-3.3-70b-versatile"
-
-
 def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
-    client, model = _build_client()
+    model = _build_model()
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -442,7 +460,7 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
     # ── Fase 1: recopilación de datos con tools ───────────────────────────────
     for _ in range(7):
         try:
-            response = client.chat.completions.create(
+            response = litellm.completion(
                 model=model,
                 messages=messages,
                 tools=TOOLS_SCHEMA,
@@ -450,7 +468,6 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
             )
         except Exception as e:
             err_str = str(e)
-            # El modelo falló al formatear la llamada → salir con los datos que tengamos
             if "tool_use_failed" in err_str or "tool call validation" in err_str:
                 break
             raise
@@ -487,7 +504,13 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
                     except ValueError:
                         pass
             func = TOOL_MAP.get(name)
-            result = func(**args) if func else {"error": f"tool '{name}' not found"}
+            if func:
+                # Filtrar parámetros que el modelo haya inventado y no existan en la firma
+                valid = inspect.signature(func).parameters
+                args = {k: v for k, v in args.items() if k in valid}
+                result = func(**args)
+            else:
+                result = {"error": f"tool '{name}' not found"}
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -497,13 +520,21 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
     # ── Fase 2: respuesta estructurada en JSON ────────────────────────────────
     messages.append({"role": "user", "content": FINAL_PROMPT})
 
-    final_response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        response_format={"type": "json_object"},
-    )
+    kwargs: dict = {"model": model, "messages": messages}
+    # Claude no soporta response_format; para Groq/Ollama lo mantenemos como ayuda
+    if settings.ai_provider != "claude":
+        kwargs["response_format"] = {"type": "json_object"}
+
+    final_response = litellm.completion(**kwargs)
 
     raw = final_response.choices[0].message.content or "{}"
+
+    # Limpiar posibles bloques de código markdown que algunos modelos añaden
+    raw = raw.strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
     data = json.loads(raw)
 
     chart_type = data.get("chart_type", "none")
@@ -562,6 +593,10 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
 
 
 async def process_chat(message: str, user_id: int = 1, history: list[dict] | None = None) -> ChatResponse:
+    if settings.ai_provider == "claude" and not settings.anthropic_api_key:
+        return ChatResponse(
+            response="API key de Anthropic no configurada. Añade ANTHROPIC_API_KEY al archivo backend/.env"
+        )
     if settings.ai_provider == "groq" and not settings.groq_api_key:
         return ChatResponse(
             response="API key de Groq no configurada. Añade GROQ_API_KEY al archivo backend/.env"
@@ -575,8 +610,8 @@ async def process_chat(message: str, user_id: int = 1, history: list[dict] | Non
             return ChatResponse(
                 response="El modelo está ocupado ahora mismo. Espera unos segundos e inténtalo de nuevo."
             )
-        if "401" in err or "invalid_api_key" in err.lower():
+        if "401" in err or "invalid_api_key" in err.lower() or "authentication" in err.lower():
             return ChatResponse(
-                response="API key de Groq inválida. Revisa el archivo backend/.env"
+                response="API key inválida. Revisa el archivo backend/.env"
             )
         return ChatResponse(response=f"Error inesperado: {err[:200]}")

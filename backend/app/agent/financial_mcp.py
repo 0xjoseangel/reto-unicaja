@@ -485,12 +485,18 @@ def make_bizum_transfer(
         db.commit()
         db.refresh(transaction)
 
+        # Saldo total = suma de TODAS las cuentas del usuario
+        all_accounts = db.query(Account).filter(Account.user_id == user_id).all()
+        total_balance = round(sum(a.balance for a in all_accounts), 2)
+
         return {
             "success": True,
             "destinatario": recipient,
             "importe": round(amount, 2),
             "concepto": concept,
-            "nuevo_saldo": account.balance,
+            "nuevo_saldo_total": total_balance,
+            "nuevo_saldo_cuenta_corriente": account.balance,
+            "nota": "nuevo_saldo_total es la suma de todas tus cuentas.",
             "fecha": transaction.date.strftime("%Y-%m-%d %H:%M"),
         }
     except Exception as e:
@@ -640,36 +646,6 @@ def calculate_compound_interest(
     }
 
 
-@mcp.tool()
-def calculate_investment_return(
-    initial_value: float,
-    final_value: float,
-    years: float,
-) -> dict:
-    """
-    Calcula la rentabilidad anual (CAGR) de una inversión dado el valor
-    inicial, el valor final y el tiempo transcurrido.
-    Úsalo para preguntas como "compré un fondo a X€ hace Y años, ahora vale Z€,
-    ¿qué rentabilidad me ha dado?". Nunca hagas este cálculo tú mismo.
-
-    Args:
-        initial_value: Valor inicial de la inversión en euros.
-        final_value: Valor actual o final de la inversión en euros.
-        years: Años transcurridos (puede ser decimal, ej: 2.5).
-    """
-    if initial_value <= 0 or final_value <= 0 or years <= 0:
-        return {"error": "Todos los valores deben ser mayores que cero."}
-
-    cagr = ((final_value / initial_value) ** (1 / years) - 1) * 100
-    ganancia_total = final_value - initial_value
-    rentabilidad_total = (ganancia_total / initial_value) * 100
-
-    return {
-        "rentabilidad_anual_cagr": round(cagr, 2),
-        "rentabilidad_total": round(rentabilidad_total, 2),
-        "ganancia_euros": round(ganancia_total, 2),
-    }
-
 
 @mcp.tool()
 def calculate_savings_goal(
@@ -733,6 +709,65 @@ def calculate_budget_distribution(monthly_income: float) -> dict:
         "ahorro_20pct": round(monthly_income * 0.20, 2),
         "descripcion": "Regla 50/30/20: necesidades / ocio / ahorro",
     }
+
+
+@mcp.tool()
+def get_income_by_period(period: str = "current_month", user_id: int = 1) -> dict:
+    """Obtiene los ingresos del usuario en un período concreto: nómina, freelance, etc.
+    Úsalo para responder '¿cuánto he cobrado este mes?', '¿cuál es mi salario este mes?',
+    '¿cuánto ingresé el mes pasado?'.
+
+    Períodos válidos: current_month, last_month, last_3_months, all_time.
+    """
+    db = SessionLocal()
+    try:
+        ids = _account_ids(db, user_id)
+        start, end = _period_dates(period)
+
+        rows = db.query(
+            Transaction.description,
+            func.sum(Transaction.amount).label("total"),
+            func.count(Transaction.id).label("count"),
+        ).filter(
+            Transaction.account_id.in_(ids),
+            Transaction.transaction_type == "ingreso",
+            Transaction.date >= start,
+            Transaction.date <= end,
+        ).group_by(Transaction.description).order_by(
+            func.sum(Transaction.amount).desc()
+        ).all()
+
+        total = sum(r.total for r in rows)
+
+        return {
+            "period": period,
+            "total_ingresos": round(total, 2),
+            "detalle": [
+                {"descripcion": r.description, "total": round(r.total, 2), "veces": r.count}
+                for r in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_account_balances(user_id: int = 1) -> dict:
+    """Devuelve el saldo de cada cuenta del usuario por separado (corriente, ahorro, etc.)
+    y el saldo total. Úsalo cuando el usuario pregunte por el saldo de una cuenta concreta,
+    o para aclarar cuánto tiene en el ahorro vs en la cuenta corriente.
+    """
+    db = SessionLocal()
+    try:
+        accounts = db.query(Account).filter(Account.user_id == user_id).all()
+        cuentas = [
+            {"tipo": a.account_type, "saldo": round(a.balance, 2)}
+            for a in accounts
+        ]
+        total = round(sum(a.balance for a in accounts), 2)
+        return {"cuentas": cuentas, "saldo_total": total}
+    finally:
+        db.close()
 
 
 @mcp.tool()
