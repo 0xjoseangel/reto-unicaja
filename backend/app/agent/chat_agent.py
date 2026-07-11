@@ -594,22 +594,24 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
 
 # ── Prompts para streaming ────────────────────────────────────────────────────
 
-STREAM_TEXT_PROMPT = """Basándote en los datos obtenidos, responde al usuario en español.
+_MARKER = "\n---JSON---\n"
+
+COMBINED_PROMPT = """Responde al usuario en español usando los datos que acabas de obtener.
 Usa Markdown: **negrita** para cifras y datos clave, listas con viñetas (-) para múltiples items,
 tablas Markdown si hay datos comparativos.
-Escribe SOLO la respuesta en texto natural. Nada de JSON ni estructura adicional.
 
-Excepción: si el usuario quiere enviar un Bizum que aún no ha confirmado, no escribas nada."""
-
-STREAM_JSON_PROMPT = """Devuelve ÚNICAMENTE este JSON, sin texto adicional ni bloques markdown:
+Cuando termines el texto escribe exactamente en una línea nueva:
+---JSON---
+Y debajo el JSON con los datos del gráfico (sin bloques de código):
 {"chart_type":"none","chart_data":[],"chart_title":"","pending_action":null}
 
-Rellena los campos con los datos de la conversación:
-- chart_type: "bar" (comparar valores), "line" (evolución temporal), "pie" (distribución porcentual), "none" (sin gráfico)
-- chart_data: array [{"name":"X","value":0}] con datos reales; [] si no hay gráfico
-- chart_title: título descriptivo del gráfico, o "" si no hay gráfico
-- pending_action: null, salvo si el usuario quiere enviar un Bizum sin confirmar:
-  {"type":"bizum_confirm","recipient":"Nombre","amount":50.0,"concept":"Concepto"}"""
+Guía chart_type: "bar"=comparar valores, "line"=evolución temporal, "pie"=distribución, "none"=sin gráfico
+Si hay gráfico, chart_data debe contener los datos reales: [{"name":"X","value":0}]
+
+CASO ESPECIAL — Bizum pendiente de confirmación:
+Si el usuario quiere enviar un Bizum sin haber confirmado, deja el texto vacío y devuelve:
+---JSON---
+{"chart_type":"none","chart_data":[],"chart_title":"","pending_action":{"type":"bizum_confirm","recipient":"Nombre","amount":50.0,"concept":"Concepto"}}"""
 
 
 async def _run_tool_loop_async(messages: list[dict], model: str) -> list[dict]:
@@ -668,8 +670,30 @@ async def _run_tool_loop_async(messages: list[dict], model: str) -> list[dict]:
     return await asyncio.to_thread(_sync)
 
 
+def _parse_chart(raw_chart: list | str) -> list[dict]:
+    _NAME_KEYS = ("name", "month", "categoria", "category", "nombre", "label")
+    _VALUE_KEYS = ("value", "total", "amount", "monto", "valor")
+    if isinstance(raw_chart, str):
+        try:
+            raw_chart = json.loads(raw_chart)
+        except Exception:
+            return []
+    normalized = []
+    for item in (raw_chart if isinstance(raw_chart, list) else []):
+        if not isinstance(item, dict):
+            continue
+        n = next((item[k] for k in _NAME_KEYS if k in item), None)
+        v = next((item[k] for k in _VALUE_KEYS if k in item), None)
+        if n is not None and v is not None:
+            try:
+                normalized.append({"name": str(n), "value": float(v)})
+            except (TypeError, ValueError):
+                pass
+    return normalized
+
+
 async def process_chat_stream(message: str, user_id: int = 1, history: list[dict] | None = None):
-    """Async generator que produce eventos SSE: tokens de texto + evento done con datos del gráfico."""
+    """Async generator — SSE: tokens de texto + evento done. Una sola llamada al modelo en Phase 2."""
     if settings.ai_provider == "claude" and not settings.anthropic_api_key:
         yield f"data: {json.dumps({'type': 'error', 'text': 'API key de Anthropic no configurada'})}\n\n"
         return
@@ -690,67 +714,72 @@ async def process_chat_stream(message: str, user_id: int = 1, history: list[dict
         yield f"data: {json.dumps({'type': 'error', 'text': str(e)[:200]})}\n\n"
         return
 
-    # Phase 2a: stream del texto de respuesta
-    text_messages = messages + [{"role": "user", "content": STREAM_TEXT_PROMPT}]
-    full_text = ""
+    # Phase 2: streaming combinado — texto + separador + JSON en una sola llamada
+    combined_messages = messages + [{"role": "user", "content": COMBINED_PROMPT}]
+    accumulated = ""   # todo el contenido acumulado del stream
+    text_yielded = 0   # cuántos caracteres de texto hemos enviado ya
+    json_found = False
+    json_raw = ""
 
     try:
-        stream = await litellm.acompletion(model=model, messages=text_messages, stream=True)
+        stream = await litellm.acompletion(model=model, messages=combined_messages, stream=True)
         async for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
-            if delta:
-                full_text += delta
-                yield f"data: {json.dumps({'type': 'token', 'text': delta}, ensure_ascii=False)}\n\n"
+            if not delta:
+                continue
+            accumulated += delta
+
+            if json_found:
+                # Ya encontramos el marcador, acumulamos el JSON
+                json_raw += delta
+                continue
+
+            marker_idx = accumulated.find(_MARKER)
+            if marker_idx != -1:
+                # Encontramos el marcador — enviamos el texto que quedaba pendiente
+                text_before = accumulated[:marker_idx]
+                pending_text = text_before[text_yielded:]
+                if pending_text:
+                    yield f"data: {json.dumps({'type': 'token', 'text': pending_text}, ensure_ascii=False)}\n\n"
+                json_found = True
+                json_raw = accumulated[marker_idx + len(_MARKER):]
+            else:
+                # Todavía no hay marcador — enviamos lo que es seguro
+                # Guardamos los últimos len(_MARKER) chars por si el marcador está partido entre chunks
+                safe_end = max(text_yielded, len(accumulated) - len(_MARKER))
+                if safe_end > text_yielded:
+                    pending_text = accumulated[text_yielded:safe_end]
+                    yield f"data: {json.dumps({'type': 'token', 'text': pending_text}, ensure_ascii=False)}\n\n"
+                    text_yielded = safe_end
+
+        # Stream terminado — enviar texto restante si el marcador nunca apareció
+        if not json_found:
+            remaining = accumulated[text_yielded:]
+            if remaining:
+                yield f"data: {json.dumps({'type': 'token', 'text': remaining}, ensure_ascii=False)}\n\n"
+
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'text': str(e)[:200]})}\n\n"
         return
 
-    # Phase 2b: JSON estructurado (gráfico + pending_action)
-    json_messages = text_messages + [
-        {"role": "assistant", "content": full_text or ""},
-        {"role": "user", "content": STREAM_JSON_PROMPT},
-    ]
-
+    # Parsear JSON del gráfico
+    raw = json_raw.strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
     try:
-        json_resp = await litellm.acompletion(model=model, messages=json_messages)
-        raw = (json_resp.choices[0].message.content or "{}").strip()
-        if raw.startswith("```"):
-            lines = raw.splitlines()
-            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         data = json.loads(raw)
     except Exception:
         data = {}
 
     chart_type = data.get("chart_type", "none")
-    raw_chart = data.get("chart_data", [])
-    chart_title = data.get("chart_title") or None
-
-    _NAME_KEYS = ("name", "month", "categoria", "category", "nombre", "label")
-    _VALUE_KEYS = ("value", "total", "amount", "monto", "valor")
-
-    if isinstance(raw_chart, str):
-        try:
-            raw_chart = json.loads(raw_chart)
-        except Exception:
-            raw_chart = []
-
-    normalized = []
-    for item in (raw_chart if isinstance(raw_chart, list) else []):
-        if not isinstance(item, dict):
-            continue
-        n = next((item[k] for k in _NAME_KEYS if k in item), None)
-        v = next((item[k] for k in _VALUE_KEYS if k in item), None)
-        if n is not None and v is not None:
-            try:
-                normalized.append({"name": str(n), "value": float(v)})
-            except (TypeError, ValueError):
-                pass
+    normalized = _parse_chart(data.get("chart_data", []))
 
     done_event = {
         "type": "done",
         "chart_type": chart_type if chart_type != "none" else None,
         "chart_data": normalized if normalized else None,
-        "chart_title": chart_title,
+        "chart_title": data.get("chart_title") or None,
         "pending_action": data.get("pending_action"),
     }
     yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
