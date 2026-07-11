@@ -592,6 +592,170 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
     )
 
 
+# ── Prompts para streaming ────────────────────────────────────────────────────
+
+STREAM_TEXT_PROMPT = """Basándote en los datos obtenidos, responde al usuario en español.
+Usa Markdown: **negrita** para cifras y datos clave, listas con viñetas (-) para múltiples items,
+tablas Markdown si hay datos comparativos.
+Escribe SOLO la respuesta en texto natural. Nada de JSON ni estructura adicional.
+
+Excepción: si el usuario quiere enviar un Bizum que aún no ha confirmado, no escribas nada."""
+
+STREAM_JSON_PROMPT = """Devuelve ÚNICAMENTE este JSON, sin texto adicional ni bloques markdown:
+{"chart_type":"none","chart_data":[],"chart_title":"","pending_action":null}
+
+Rellena los campos con los datos de la conversación:
+- chart_type: "bar" (comparar valores), "line" (evolución temporal), "pie" (distribución porcentual), "none" (sin gráfico)
+- chart_data: array [{"name":"X","value":0}] con datos reales; [] si no hay gráfico
+- chart_title: título descriptivo del gráfico, o "" si no hay gráfico
+- pending_action: null, salvo si el usuario quiere enviar un Bizum sin confirmar:
+  {"type":"bizum_confirm","recipient":"Nombre","amount":50.0,"concept":"Concepto"}"""
+
+
+async def _run_tool_loop_async(messages: list[dict], model: str) -> list[dict]:
+    """Phase 1: tool-calling loop ejecutado en un thread. Devuelve los mensajes actualizados."""
+    def _sync() -> list[dict]:
+        msgs = list(messages)
+        for _ in range(7):
+            try:
+                response = litellm.completion(
+                    model=model, messages=msgs, tools=TOOLS_SCHEMA, tool_choice="auto",
+                )
+            except Exception as e:
+                err_str = str(e)
+                if "tool_use_failed" in err_str or "tool call validation" in err_str:
+                    break
+                raise
+
+            assistant_msg = response.choices[0].message
+            tool_calls = assistant_msg.tool_calls or []
+
+            assistant_dict: dict = {"role": "assistant", "content": assistant_msg.content or ""}
+            if tool_calls:
+                assistant_dict["tool_calls"] = [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in tool_calls
+                ]
+            msgs.append(assistant_dict)
+
+            if not tool_calls:
+                break
+
+            for tc in tool_calls:
+                name = tc.function.name
+                args = json.loads(tc.function.arguments)
+                for key in ("user_id", "limit"):
+                    if key in args and isinstance(args[key], str):
+                        try:
+                            args[key] = int(args[key])
+                        except ValueError:
+                            pass
+                func = TOOL_MAP.get(name)
+                if func:
+                    valid = inspect.signature(func).parameters
+                    args = {k: v for k, v in args.items() if k in valid}
+                    result = func(**args)
+                else:
+                    result = {"error": f"tool '{name}' not found"}
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
+        return msgs
+
+    return await asyncio.to_thread(_sync)
+
+
+async def process_chat_stream(message: str, user_id: int = 1, history: list[dict] | None = None):
+    """Async generator que produce eventos SSE: tokens de texto + evento done con datos del gráfico."""
+    if settings.ai_provider == "claude" and not settings.anthropic_api_key:
+        yield f"data: {json.dumps({'type': 'error', 'text': 'API key de Anthropic no configurada'})}\n\n"
+        return
+    if settings.ai_provider == "groq" and not settings.groq_api_key:
+        yield f"data: {json.dumps({'type': 'error', 'text': 'API key de Groq no configurada'})}\n\n"
+        return
+
+    model = _build_model()
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in (history or []):
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": f"[user_id={user_id}] {message}"})
+
+    # Phase 1: tool-calling loop en thread
+    try:
+        messages = await _run_tool_loop_async(messages, model)
+    except Exception as e:
+        yield f"data: {json.dumps({'type': 'error', 'text': str(e)[:200]})}\n\n"
+        return
+
+    # Phase 2a: stream del texto de respuesta
+    text_messages = messages + [{"role": "user", "content": STREAM_TEXT_PROMPT}]
+    full_text = ""
+
+    try:
+        stream = await litellm.acompletion(model=model, messages=text_messages, stream=True)
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                full_text += delta
+                yield f"data: {json.dumps({'type': 'token', 'text': delta}, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        yield f"data: {json.dumps({'type': 'error', 'text': str(e)[:200]})}\n\n"
+        return
+
+    # Phase 2b: JSON estructurado (gráfico + pending_action)
+    json_messages = text_messages + [
+        {"role": "assistant", "content": full_text or ""},
+        {"role": "user", "content": STREAM_JSON_PROMPT},
+    ]
+
+    try:
+        json_resp = await litellm.acompletion(model=model, messages=json_messages)
+        raw = (json_resp.choices[0].message.content or "{}").strip()
+        if raw.startswith("```"):
+            lines = raw.splitlines()
+            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        data = json.loads(raw)
+    except Exception:
+        data = {}
+
+    chart_type = data.get("chart_type", "none")
+    raw_chart = data.get("chart_data", [])
+    chart_title = data.get("chart_title") or None
+
+    _NAME_KEYS = ("name", "month", "categoria", "category", "nombre", "label")
+    _VALUE_KEYS = ("value", "total", "amount", "monto", "valor")
+
+    if isinstance(raw_chart, str):
+        try:
+            raw_chart = json.loads(raw_chart)
+        except Exception:
+            raw_chart = []
+
+    normalized = []
+    for item in (raw_chart if isinstance(raw_chart, list) else []):
+        if not isinstance(item, dict):
+            continue
+        n = next((item[k] for k in _NAME_KEYS if k in item), None)
+        v = next((item[k] for k in _VALUE_KEYS if k in item), None)
+        if n is not None and v is not None:
+            try:
+                normalized.append({"name": str(n), "value": float(v)})
+            except (TypeError, ValueError):
+                pass
+
+    done_event = {
+        "type": "done",
+        "chart_type": chart_type if chart_type != "none" else None,
+        "chart_data": normalized if normalized else None,
+        "chart_title": chart_title,
+        "pending_action": data.get("pending_action"),
+    }
+    yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+
+
 async def process_chat(message: str, user_id: int = 1, history: list[dict] | None = None) -> ChatResponse:
     if settings.ai_provider == "claude" and not settings.anthropic_api_key:
         return ChatResponse(

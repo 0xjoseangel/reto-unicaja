@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { sendChatMessage } from '../services/api'
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
 
@@ -19,7 +18,6 @@ export default function ChatBox() {
       text: '¡Hola! Soy tu asistente financiero personal. Puedes preguntarme sobre tus gastos, ingresos o saldo. ¿En qué puedo ayudarte hoy?',
     },
   ])
-  // Historial solo texto (user/assistant) que se envía al backend en cada petición
   const [history, setHistory] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -34,40 +32,94 @@ export default function ChatBox() {
     const message = text || input.trim()
     if (!message || loading) return
 
-    setMessages((prev) => [...prev, { role: 'user', text: message }])
+    setMessages(prev => [...prev, { role: 'user', text: message }])
     setInput('')
     setLoading(true)
 
-    // El historial que enviamos incluye ya el mensaje actual del usuario
     const updatedHistory = [...history, { role: 'user', content: message }]
 
     try {
-      const data = await sendChatMessage(message, updatedHistory)
+      const res = await fetch('/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, user_id: 1, history: updatedHistory }),
+      })
 
-      if (data.pending_action?.type === 'bizum_confirm') {
-        setPendingBizum(data.pending_action)
-        setHistory(updatedHistory)
-        setLoading(false)
-        return
+      if (!res.ok) throw new Error('Server error')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let streamingText = ''
+      let assistantAdded = false
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        // Keep incomplete last line in buffer
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (!raw) continue
+
+          let event
+          try { event = JSON.parse(raw) } catch { continue }
+
+          if (event.type === 'token') {
+            streamingText += event.text
+            if (!assistantAdded) {
+              setMessages(prev => [...prev, { role: 'assistant', text: streamingText }])
+              assistantAdded = true
+              setLoading(false)
+            } else {
+              setMessages(prev => {
+                const updated = [...prev]
+                updated[updated.length - 1] = { role: 'assistant', text: streamingText }
+                return updated
+              })
+            }
+
+          } else if (event.type === 'done') {
+            if (event.pending_action?.type === 'bizum_confirm') {
+              // Quitar el mensaje streamed (suele estar vacío) y mostrar modal
+              if (assistantAdded) {
+                setMessages(prev => prev.slice(0, -1))
+              }
+              setPendingBizum(event.pending_action)
+              setHistory(updatedHistory)
+              return
+            }
+
+            // Si no hubo ningún token (respuesta vacía), añadir mensaje vacío silencioso
+            if (!assistantAdded && streamingText) {
+              setMessages(prev => [...prev, { role: 'assistant', text: streamingText }])
+            }
+
+            if (event.chart_type && event.chart_data?.length) {
+              setMessages(prev => [...prev, {
+                role: 'chart',
+                chart: {
+                  type: event.chart_type,
+                  data: event.chart_data,
+                  title: event.chart_title,
+                },
+              }])
+            }
+
+            setHistory([...updatedHistory, { role: 'assistant', content: streamingText }])
+
+          } else if (event.type === 'error') {
+            setMessages(prev => [...prev, { role: 'assistant', text: event.text }])
+          }
+        }
       }
-
-      const newMessages = [{ role: 'assistant', text: data.response }]
-
-      if (data.chart_type && data.chart_data) {
-        newMessages.push({
-          role: 'chart',
-          chart: {
-            type: data.chart_type,
-            data: data.chart_data,
-            title: data.chart_title,
-          },
-        })
-      }
-
-      setMessages((prev) => [...prev, ...newMessages])
-      setHistory([...updatedHistory, { role: 'assistant', content: data.response }])
     } catch {
-      setMessages((prev) => [
+      setMessages(prev => [
         ...prev,
         { role: 'assistant', text: 'Lo siento, ha ocurrido un error. ¿Puedes intentarlo de nuevo?' },
       ])
@@ -84,12 +136,11 @@ export default function ChatBox() {
 
   function handleBizumCancel() {
     setPendingBizum(null)
-    setMessages((prev) => [...prev, { role: 'assistant', text: 'Bizum cancelado.' }])
+    setMessages(prev => [...prev, { role: 'assistant', text: 'Bizum cancelado.' }])
   }
 
   return (
     <div className="flex flex-col h-full bg-transparent relative">
-      {/* Bizum confirmation modal */}
       {pendingBizum && (
         <BizumConfirmModal
           recipient={pendingBizum.recipient}
@@ -139,7 +190,7 @@ export default function ChatBox() {
           )
         })}
 
-        {/* Loading dots */}
+        {/* Loading dots — solo durante Phase 1 (antes del primer token) */}
         {loading && (
           <div className="flex gap-2.5 justify-start">
             <div className="w-7 h-7 rounded-full bg-unicaja/15 border border-unicaja/30 flex items-center justify-center flex-none text-[10px] font-bold text-unicaja">
@@ -175,7 +226,7 @@ export default function ChatBox() {
         ))}
       </div>
 
-      {/* Input area */}
+      {/* Input */}
       <div className="flex-none px-3 pb-3 pt-1">
         <div className="bezel-outer">
           <div className="bezel-inner rounded-[19px] px-3 py-2 flex gap-2 items-center">
@@ -188,7 +239,6 @@ export default function ChatBox() {
               placeholder="Escribe tu consulta financiera..."
               disabled={loading}
             />
-            {/* Button-in-Button */}
             <button
               onClick={() => handleSend()}
               disabled={loading || !input.trim()}
