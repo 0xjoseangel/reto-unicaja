@@ -16,20 +16,24 @@ import os
 import litellm
 
 from app.agent.financial_mcp import (
+    add_investment,
     calculate_budget_distribution,
     calculate_compound_interest,
     calculate_loan,
     calculate_mortgage,
     calculate_savings_goal,
     get_account_balances,
+    get_asset_details,
     get_bizum_history,
     get_category_breakdown,
     get_expenses_by_category,
     get_financial_summary,
     get_income_by_period,
     get_largest_expenses,
+    get_market_overview,
     get_monthly_evolution,
     get_places_by_category,
+    get_portfolio,
     get_recent_transactions,
     get_spending_analysis,
     get_transaction_count,
@@ -37,7 +41,12 @@ from app.agent.financial_mcp import (
     search_specific_transactions,
 )
 from app.core.config import settings
-from app.schemas.financial import ChatResponse, ChartDataPoint, PendingBizumAction
+from app.schemas.financial import (
+    ChatResponse,
+    ChartDataPoint,
+    PendingBizumAction,
+    PendingInvestmentAction,
+)
 
 SYSTEM_PROMPT = """Eres un asistente financiero personal que responde siempre en español.
 
@@ -67,8 +76,23 @@ Guía de herramientas:
 - calculate_savings_goal       → tiempo necesario para alcanzar un objetivo de ahorro
 - calculate_budget_distribution → distribuye ingresos con la regla 50/30/20
 
+- get_portfolio             → cartera de inversiones con precios actualizados y rentabilidad
+- get_asset_details         → datos de un activo concreto (precio, PE, dividendo, sector)
+- get_market_overview       → estado de los mercados globales (S&P500, IBEX, Nasdaq, Oro)
+- add_investment            → registra una compra de acciones/ETF en la cartera; SIEMPRE pide confirmación antes
+
 IMPORTANTE: para CUALQUIER cálculo numérico financiero usa SIEMPRE la herramienta
 correspondiente. Nunca hagas matemáticas tú mismo: los errores de cálculo son inaceptables.
+
+INVERSIONES — reglas:
+- Para ver la cartera con precios reales: usa get_portfolio()
+- Para analizar un activo específico: usa get_asset_details(ticker)
+- Para el estado del mercado hoy: usa get_market_overview()
+- Para registrar una compra: devuelve pending_action investment_confirm (no llames a add_investment todavía)
+- SOLO llama a add_investment cuando el mensaje sea una confirmación explícita del tipo
+  "Sí, confirma la compra de X acciones de TICKER a PRECIO€"
+- Analiza diversificación, concentración y rentabilidad cuando el usuario pregunte
+- Para gráficos de cartera: pie chart por valor actual de cada activo; bar chart para ganancia/pérdida
 
 Regla para Bizum:
 - Cuando el usuario PIDA enviar un Bizum, devuelve pending_action (no llames a make_bizum_transfer todavía).
@@ -115,6 +139,18 @@ Si el usuario quiere enviar un Bizum pero aún no has ejecutado make_bizum_trans
   "chart_title": ""
 }
 Cuando ya hayas ejecutado make_bizum_transfer, pon pending_action=null y describe el resultado en response_text.
+
+CASO ESPECIAL — Confirmación de inversión:
+Si el usuario quiere registrar una compra de acciones/ETF pero aún no has ejecutado add_investment
+(es decir, necesitas confirmación), usa "pending_action" con este formato:
+{
+  "pending_action": {"type": "investment_confirm", "ticker": "AAPL", "nombre": "Apple Inc.", "shares": 10, "avg_purchase_price": 150.0, "investment_type": "accion"},
+  "response_text": "",
+  "chart_type": "none",
+  "chart_data": "[]",
+  "chart_title": ""
+}
+Cuando ya hayas ejecutado add_investment, pon pending_action=null y confirma la operación en response_text.
 
 IMPORTANTE: Responde ÚNICAMENTE con el JSON. Sin texto adicional, sin bloques de código markdown.
 """
@@ -405,6 +441,61 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_portfolio",
+            "description": "Cartera de inversiones del usuario con precios actualizados del mercado y rentabilidad. Para '¿cómo va mi cartera?', '¿cuánto vale mi inversión?', '¿cuánto he ganado o perdido?'.",
+            "parameters": {
+                "type": "object",
+                "properties": {"user_id": {"type": "integer"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_asset_details",
+            "description": "Información detallada de un activo: precio actual, variación del día, PER, dividendo, rango 52 semanas, sector. Para 'dame info de Apple', '¿cómo está Tesla?', '¿cuál es el PER de Inditex?'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "Símbolo del activo (ej: AAPL, SAN.MC, IWDA.AS)."},
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_overview",
+            "description": "Estado actual de los principales índices bursátiles: S&P 500, Nasdaq, IBEX 35, Euro Stoxx 50, Oro. Para '¿cómo están los mercados hoy?', '¿sube o baja la bolsa?'.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_investment",
+            "description": (
+                "Registra una compra de activo financiero en la cartera del usuario. "
+                "IMPORTANTE: DEBES pedir confirmación al usuario antes de llamar a esta función. "
+                "Solo llámala cuando el usuario haya confirmado explícitamente."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "integer"},
+                    "ticker": {"type": "string", "description": "Símbolo del activo (ej: AAPL, VOO, SAN.MC)."},
+                    "shares": {"type": "number", "description": "Número de acciones/participaciones compradas."},
+                    "avg_purchase_price": {"type": "number", "description": "Precio de compra por acción."},
+                    "investment_type": {"type": "string", "enum": ["accion", "etf", "fondo_indexado"]},
+                },
+                "required": ["user_id", "ticker", "shares", "avg_purchase_price"],
+            },
+        },
+    },
 ]
 
 TOOL_MAP = {
@@ -427,6 +518,10 @@ TOOL_MAP = {
     "calculate_compound_interest": calculate_compound_interest,
     "calculate_savings_goal": calculate_savings_goal,
     "calculate_budget_distribution": calculate_budget_distribution,
+    "get_portfolio": get_portfolio,
+    "get_asset_details": get_asset_details,
+    "get_market_overview": get_market_overview,
+    "add_investment": add_investment,
 }
 
 
@@ -572,14 +667,25 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
 
     pending_action = None
     raw_pending = data.get("pending_action")
-    if isinstance(raw_pending, dict) and raw_pending.get("type") == "bizum_confirm":
+    if isinstance(raw_pending, dict):
+        action_type = raw_pending.get("type")
         try:
-            pending_action = PendingBizumAction(
-                type="bizum_confirm",
-                recipient=str(raw_pending["recipient"]),
-                amount=float(raw_pending["amount"]),
-                concept=str(raw_pending.get("concept", "Bizum")),
-            )
+            if action_type == "bizum_confirm":
+                pending_action = PendingBizumAction(
+                    type="bizum_confirm",
+                    recipient=str(raw_pending["recipient"]),
+                    amount=float(raw_pending["amount"]),
+                    concept=str(raw_pending.get("concept", "Bizum")),
+                )
+            elif action_type == "investment_confirm":
+                pending_action = PendingInvestmentAction(
+                    type="investment_confirm",
+                    ticker=str(raw_pending["ticker"]),
+                    nombre=str(raw_pending.get("nombre", raw_pending["ticker"])),
+                    shares=float(raw_pending["shares"]),
+                    avg_purchase_price=float(raw_pending["avg_purchase_price"]),
+                    investment_type=str(raw_pending.get("investment_type", "accion")),
+                )
         except (KeyError, ValueError, TypeError):
             pass
 
@@ -596,22 +702,14 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
 
 _MARKER = "\n---JSON---\n"
 
-COMBINED_PROMPT = """Responde al usuario en español usando los datos que acabas de obtener.
-Usa Markdown: **negrita** para cifras y datos clave, listas con viñetas (-) para múltiples items,
-tablas Markdown si hay datos comparativos.
-
-Cuando termines el texto escribe exactamente en una línea nueva:
----JSON---
-Y debajo el JSON con los datos del gráfico (sin bloques de código):
-{"chart_type":"none","chart_data":[],"chart_title":"","pending_action":null}
-
-Guía chart_type: "bar"=comparar valores, "line"=evolución temporal, "pie"=distribución, "none"=sin gráfico
-Si hay gráfico, chart_data debe contener los datos reales: [{"name":"X","value":0}]
-
-CASO ESPECIAL — Bizum pendiente de confirmación:
-Si el usuario quiere enviar un Bizum sin haber confirmado, deja el texto vacío y devuelve:
----JSON---
-{"chart_type":"none","chart_data":[],"chart_title":"","pending_action":{"type":"bizum_confirm","recipient":"Nombre","amount":50.0,"concept":"Concepto"}}"""
+COMBINED_PROMPT = """Escribe ahora la respuesta al usuario en español usando los datos de las herramientas.
+- Usa **negrita** para cifras, listas (-) para múltiples items, tablas si hay comparativas.
+- Al terminar escribe literalmente: ---JSON---
+- En la línea siguiente el JSON: {"chart_type":"none","chart_data":[],"chart_title":"","pending_action":null}
+- chart_type: "bar" comparar valores, "line" evolución temporal, "pie" distribución, "none" sin gráfico
+- Si hay gráfico incluye chart_data: [{"name":"X","value":0},...]
+- Bizum sin confirmar → texto vacío y pending_action: {"type":"bizum_confirm","recipient":"...","amount":0,"concept":"..."}
+- Inversión sin confirmar → texto vacío y pending_action: {"type":"investment_confirm","ticker":"...","nombre":"...","shares":0,"avg_purchase_price":0,"investment_type":"accion"}"""
 
 
 async def _run_tool_loop_async(messages: list[dict], model: str) -> list[dict]:

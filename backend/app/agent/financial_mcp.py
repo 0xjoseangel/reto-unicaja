@@ -8,11 +8,12 @@ no las envuelve ni cambia su comportamiento.
 """
 from datetime import datetime, timedelta
 
+import yfinance as yf
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import extract, func
 
 from app.core.database import SessionLocal
-from app.models.financial import Account, Transaction
+from app.models.financial import Account, Investment, Transaction
 
 mcp = FastMCP("financial-assistant")
 
@@ -791,5 +792,223 @@ def get_bizum_history(limit: int = 10, user_id: int = 1) -> dict:
                 for r in rows
             ]
         }
+    finally:
+        db.close()
+
+
+# ── Inversiones y mercados ─────────────────────────────────────────────────────
+
+@mcp.tool()
+def get_portfolio(user_id: int = 1) -> dict:
+    """Obtiene la cartera de inversiones del usuario con precios actualizados del mercado
+    en tiempo real (acciones, ETFs, fondos indexados). Calcula rentabilidad por activo y total.
+    Úsalo para '¿cómo va mi cartera?', '¿cuánto vale mi inversión?', '¿cuánto he ganado?'."""
+    db = SessionLocal()
+    try:
+        investments = db.query(Investment).filter(Investment.user_id == user_id).all()
+        if not investments:
+            return {"activos": [], "resumen": {}, "mensaje": "No tienes inversiones registradas en tu cartera."}
+
+        activos = []
+        valor_total = 0.0
+        coste_total = 0.0
+
+        for inv in investments:
+            current_price = inv.avg_purchase_price  # fallback
+            try:
+                fast = yf.Ticker(inv.ticker).fast_info
+                price = fast.last_price
+                if price and price == price:  # NaN check
+                    current_price = price
+            except Exception:
+                pass
+
+            valor_actual = round(current_price * inv.shares, 2)
+            coste = round(inv.avg_purchase_price * inv.shares, 2)
+            ganancia = round(valor_actual - coste, 2)
+            ganancia_pct = round((ganancia / coste) * 100, 2) if coste > 0 else 0.0
+
+            valor_total += valor_actual
+            coste_total += coste
+
+            activos.append({
+                "ticker": inv.ticker,
+                "nombre": inv.name,
+                "tipo": inv.investment_type,
+                "shares": inv.shares,
+                "precio_compra_medio": inv.avg_purchase_price,
+                "precio_actual": round(current_price, 4),
+                "valor_actual": valor_actual,
+                "coste_total": coste,
+                "ganancia_perdida": ganancia,
+                "ganancia_perdida_pct": ganancia_pct,
+                "moneda": inv.currency,
+            })
+
+        coste_total = round(coste_total, 2)
+        valor_total = round(valor_total, 2)
+        ganancia_total = round(valor_total - coste_total, 2)
+        ganancia_total_pct = round((ganancia_total / coste_total) * 100, 2) if coste_total > 0 else 0.0
+
+        return {
+            "activos": activos,
+            "resumen": {
+                "valor_total": valor_total,
+                "coste_total": coste_total,
+                "ganancia_total": ganancia_total,
+                "ganancia_total_pct": ganancia_total_pct,
+            },
+        }
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_asset_details(ticker: str) -> dict:
+    """Obtiene información detallada de un activo financiero: precio actual, variación del día,
+    PER, dividendo, rango 52 semanas, sector. Úsalo para 'dame info de Apple', '¿cómo está Tesla?'."""
+    try:
+        ticker = ticker.upper()
+        t = yf.Ticker(ticker)
+        info = t.info
+        fast = t.fast_info
+
+        price = fast.last_price or 0.0
+        prev = fast.previous_close or price
+        daily_pct = round(((price - prev) / prev) * 100, 2) if prev else 0.0
+
+        return {
+            "ticker": ticker,
+            "nombre": info.get("longName") or info.get("shortName", ticker),
+            "precio_actual": round(price, 4),
+            "variacion_dia_pct": daily_pct,
+            "moneda": info.get("currency", "USD"),
+            "sector": info.get("sector", "N/D"),
+            "industria": info.get("industry", "N/D"),
+            "pe_ratio": round(info.get("trailingPE") or 0, 2),
+            "dividendo_rendimiento_pct": round((info.get("dividendYield") or 0) * 100, 2),
+            "rango_52_semanas_min": round(info.get("fiftyTwoWeekLow") or 0, 2),
+            "rango_52_semanas_max": round(info.get("fiftyTwoWeekHigh") or 0, 2),
+            "capitalizacion_mercado": info.get("marketCap"),
+            "descripcion": (info.get("longBusinessSummary") or "")[:400],
+        }
+    except Exception as e:
+        return {"error": f"No se pudo obtener información de '{ticker}': {str(e)[:120]}"}
+
+
+@mcp.tool()
+def get_market_overview() -> dict:
+    """Obtiene el estado actual de los principales índices bursátiles y mercados globales.
+    Úsalo para '¿cómo están los mercados?', '¿sube o baja la bolsa hoy?'."""
+    MARKETS = [
+        ("^GSPC", "S&P 500"),
+        ("^IXIC", "Nasdaq"),
+        ("^IBEX", "IBEX 35"),
+        ("^STOXX50E", "Euro Stoxx 50"),
+        ("GC=F", "Oro"),
+    ]
+
+    mercados = []
+    for symbol, name in MARKETS:
+        try:
+            fast = yf.Ticker(symbol).fast_info
+            price = fast.last_price or 0.0
+            prev = fast.previous_close or price
+            change_pct = round(((price - prev) / prev) * 100, 2) if prev else 0.0
+            mercados.append({
+                "nombre": name,
+                "ticker": symbol,
+                "precio": round(price, 2),
+                "variacion_dia_pct": change_pct,
+            })
+        except Exception:
+            mercados.append({"nombre": name, "ticker": symbol, "precio": None, "variacion_dia_pct": None})
+
+    return {"mercados": mercados, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+
+@mcp.tool()
+def add_investment(
+    user_id: int,
+    ticker: str,
+    shares: float,
+    avg_purchase_price: float,
+    investment_type: str = "accion",
+) -> dict:
+    """Registra una compra de activo financiero en la cartera del usuario.
+
+    IMPORTANTE: DEBES haber confirmado con el usuario el ticker, número de acciones
+    y precio de compra ANTES de llamar a esta función.
+
+    Args:
+        user_id: ID del usuario.
+        ticker: Símbolo del activo (ej: AAPL, VOO, SAN.MC, IWDA.AS).
+        shares: Número de acciones/participaciones compradas (> 0).
+        avg_purchase_price: Precio de compra por acción/participación (> 0).
+        investment_type: Tipo: accion, etf, fondo_indexado.
+    """
+    if shares <= 0 or avg_purchase_price <= 0:
+        return {"success": False, "error": "El número de acciones y el precio deben ser mayores que cero."}
+
+    ticker = ticker.upper()
+
+    try:
+        t = yf.Ticker(ticker)
+        fast = t.fast_info
+        info = t.info
+        name = info.get("longName") or info.get("shortName") or ticker
+        currency = getattr(fast, "currency", None) or info.get("currency", "USD")
+        if not fast.last_price:
+            return {"success": False, "error": f"Ticker '{ticker}' no encontrado o sin cotización activa."}
+    except Exception as e:
+        return {"success": False, "error": f"Ticker '{ticker}' no válido: {str(e)[:120]}"}
+
+    db = SessionLocal()
+    try:
+        existing = db.query(Investment).filter(
+            Investment.user_id == user_id,
+            Investment.ticker == ticker,
+        ).first()
+
+        if existing:
+            total_shares = existing.shares + shares
+            new_avg = (existing.shares * existing.avg_purchase_price + shares * avg_purchase_price) / total_shares
+            existing.shares = round(total_shares, 6)
+            existing.avg_purchase_price = round(new_avg, 4)
+            db.commit()
+            return {
+                "success": True,
+                "ticker": ticker,
+                "nombre": existing.name,
+                "shares_total": round(total_shares, 6),
+                "precio_medio": round(new_avg, 4),
+                "moneda": currency,
+                "operacion": "actualizado",
+            }
+        else:
+            inv = Investment(
+                user_id=user_id,
+                ticker=ticker,
+                name=name,
+                investment_type=investment_type,
+                shares=round(shares, 6),
+                avg_purchase_price=round(avg_purchase_price, 4),
+                currency=currency,
+                purchase_date=datetime.now(),
+            )
+            db.add(inv)
+            db.commit()
+            return {
+                "success": True,
+                "ticker": ticker,
+                "nombre": name,
+                "shares_total": round(shares, 6),
+                "precio_medio": round(avg_purchase_price, 4),
+                "moneda": currency,
+                "operacion": "añadido",
+            }
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}
     finally:
         db.close()

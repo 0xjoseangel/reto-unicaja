@@ -14,6 +14,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
 
     accounts: Mapped[list["Account"]] = relationship("Account", back_populates="user")
+    investments: Mapped[list["Investment"]] = relationship("Investment", back_populates="user")
 
 
 class Account(Base):
@@ -41,3 +42,19 @@ class Transaction(Base):
     date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     account: Mapped["Account"] = relationship("Account", back_populates="transactions")
+
+
+class Investment(Base):
+    __tablename__ = "investments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    investment_type: Mapped[str] = mapped_column(String(50), nullable=False)  # accion | etf | fondo_indexado
+    shares: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_purchase_price: Mapped[float] = mapped_column(Float, nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+    purchase_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    user: Mapped["User"] = relationship("User", back_populates="investments")

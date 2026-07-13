@@ -56,9 +56,18 @@ class PendingBizumAction(BaseModel):
     concept: str
 
 
+class PendingInvestmentAction(BaseModel):
+    type: Literal["investment_confirm"]
+    ticker: str
+    nombre: str
+    shares: float
+    avg_purchase_price: float
+    investment_type: str
+
+
 class ChatResponse(BaseModel):
     response: str
     chart_type: Literal["bar", "line", "pie"] | None = None
     chart_data: list[ChartDataPoint] | None = None
     chart_title: str | None = None
-    pending_action: PendingBizumAction | None = None
+    pending_action: PendingBizumAction | PendingInvestmentAction | None = None

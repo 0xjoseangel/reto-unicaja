@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(__file__))
 
 from app.core.database import Base, SessionLocal, engine
-from app.models.financial import Account, Transaction, User
+from app.models.financial import Account, Investment, Transaction, User
 
 EXPENSE_CATEGORIES = {
     "restaurantes": (15, 80),
@@ -122,5 +122,54 @@ def seed():
     print(f"Seed completado: 1 usuario, 2 cuentas, {total} transacciones generadas.")
 
 
+def seed_investments():
+    """Añade una cartera de inversiones de ejemplo para el usuario."""
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        if db.query(Investment).count() > 0:
+            print("Inversiones ya seeded. Saltando.")
+            return
+
+        user = db.query(User).first()
+        if not user:
+            print("Error: no hay usuario. Ejecuta seed() primero.")
+            return
+
+        investments = [
+            Investment(
+                user_id=user.id, ticker="AAPL", name="Apple Inc.",
+                investment_type="accion", shares=10, avg_purchase_price=145.00,
+                currency="USD", purchase_date=datetime(2023, 3, 15),
+            ),
+            Investment(
+                user_id=user.id, ticker="MSFT", name="Microsoft Corp.",
+                investment_type="accion", shares=5, avg_purchase_price=310.00,
+                currency="USD", purchase_date=datetime(2023, 6, 20),
+            ),
+            Investment(
+                user_id=user.id, ticker="VOO", name="Vanguard S&P 500 ETF",
+                investment_type="etf", shares=8, avg_purchase_price=390.00,
+                currency="USD", purchase_date=datetime(2022, 11, 10),
+            ),
+            Investment(
+                user_id=user.id, ticker="IWDA.AS", name="iShares Core MSCI World ETF",
+                investment_type="fondo_indexado", shares=50, avg_purchase_price=82.00,
+                currency="EUR", purchase_date=datetime(2022, 8, 5),
+            ),
+            Investment(
+                user_id=user.id, ticker="SAN.MC", name="Banco Santander S.A.",
+                investment_type="accion", shares=200, avg_purchase_price=3.80,
+                currency="EUR", purchase_date=datetime(2023, 9, 1),
+            ),
+        ]
+        db.add_all(investments)
+        db.commit()
+        print(f"Inversiones seeded: {len(investments)} activos registrados.")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     seed()
+    seed_investments()

@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
+import InvestmentConfirmModal from './InvestmentConfirmModal'
 
 const SUGGESTIONS = [
   '¿Cuál es mi saldo actual?',
@@ -22,6 +23,7 @@ export default function ChatBox() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [pendingBizum, setPendingBizum] = useState(null)
+  const [pendingInvestment, setPendingInvestment] = useState(null)
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -86,11 +88,14 @@ export default function ChatBox() {
 
           } else if (event.type === 'done') {
             if (event.pending_action?.type === 'bizum_confirm') {
-              // Quitar el mensaje streamed (suele estar vacío) y mostrar modal
-              if (assistantAdded) {
-                setMessages(prev => prev.slice(0, -1))
-              }
+              if (assistantAdded) setMessages(prev => prev.slice(0, -1))
               setPendingBizum(event.pending_action)
+              setHistory(updatedHistory)
+              return
+            }
+            if (event.pending_action?.type === 'investment_confirm') {
+              if (assistantAdded) setMessages(prev => prev.slice(0, -1))
+              setPendingInvestment(event.pending_action)
               setHistory(updatedHistory)
               return
             }
@@ -139,6 +144,17 @@ export default function ChatBox() {
     setMessages(prev => [...prev, { role: 'assistant', text: 'Bizum cancelado.' }])
   }
 
+  function handleInvestmentConfirm() {
+    const { ticker, shares, avg_purchase_price, investment_type } = pendingInvestment
+    setPendingInvestment(null)
+    handleSend(`Sí, confirma la compra de ${shares} acciones de ${ticker} a ${avg_purchase_price} con tipo ${investment_type}`)
+  }
+
+  function handleInvestmentCancel() {
+    setPendingInvestment(null)
+    setMessages(prev => [...prev, { role: 'assistant', text: 'Compra cancelada.' }])
+  }
+
   return (
     <div className="flex flex-col h-full bg-transparent relative">
       {pendingBizum && (
@@ -148,6 +164,17 @@ export default function ChatBox() {
           concept={pendingBizum.concept}
           onConfirm={handleBizumConfirm}
           onCancel={handleBizumCancel}
+        />
+      )}
+      {pendingInvestment && (
+        <InvestmentConfirmModal
+          ticker={pendingInvestment.ticker}
+          nombre={pendingInvestment.nombre}
+          shares={pendingInvestment.shares}
+          avgPrice={pendingInvestment.avg_purchase_price}
+          investmentType={pendingInvestment.investment_type}
+          onConfirm={handleInvestmentConfirm}
+          onCancel={handleInvestmentCancel}
         />
       )}
 
