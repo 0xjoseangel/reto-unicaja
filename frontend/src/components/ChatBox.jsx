@@ -143,9 +143,9 @@ export default function ChatBox() {
   }
 
   function handleInvestmentConfirm() {
-    const { ticker, shares, avg_purchase_price, investment_type } = pendingInvestment
+    const { ticker, shares, avg_purchase_price } = pendingInvestment
     setPendingInvestment(null)
-    handleSend(`Sí, confirma la compra de ${shares} acciones de ${ticker} a ${avg_purchase_price} con tipo ${investment_type}`)
+    handleSend(`Sí, confirma la compra de ${shares} acciones de ${ticker} a ${avg_purchase_price} por acción`)
   }
 
   function handleInvestmentCancel() {
