@@ -61,7 +61,6 @@ export default function ChatBox() {
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
-        // Keep incomplete last line in buffer
         buffer = lines.pop() ?? ''
 
         for (const line of lines) {
@@ -100,7 +99,6 @@ export default function ChatBox() {
               return
             }
 
-            // Si no hubo ningún token (respuesta vacía), añadir mensaje vacío silencioso
             if (!assistantAdded && streamingText) {
               setMessages(prev => [...prev, { role: 'assistant', text: streamingText }])
             }
@@ -156,7 +154,7 @@ export default function ChatBox() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-transparent relative">
+    <div className="flex flex-col h-full bg-[#FBFBFA] relative">
       {pendingBizum && (
         <BizumConfirmModal
           recipient={pendingBizum.recipient}
@@ -179,7 +177,7 @@ export default function ChatBox() {
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
+      <div className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-4">
         {messages.map((msg, i) => {
           if (msg.role === 'chart') {
             return (
@@ -194,41 +192,44 @@ export default function ChatBox() {
           }
 
           return (
-            <div key={i} className={`flex gap-2.5 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div key={i} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               {msg.role === 'assistant' && (
-                <div className="w-7 h-7 rounded-full bg-unicaja/15 border border-unicaja/30 flex items-center justify-center flex-none mt-0.5 text-[10px] font-bold text-unicaja">
+                <div className="w-7 h-7 rounded-[6px] bg-[#EDF3EC] border border-[#C6DEC5]
+                  flex items-center justify-center flex-none mt-0.5
+                  text-[10px] font-semibold text-[#346538] tracking-tight">
                   AI
                 </div>
               )}
               {msg.role === 'user' ? (
-                <div className="max-w-[75%] px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line bubble-animate
-                  bg-unicaja text-white rounded-2xl rounded-br-sm
-                  shadow-[0_0_24px_rgba(0,166,81,0.30)]">
+                <div className="max-w-[72%] px-4 py-2.5 text-sm leading-relaxed bubble-animate
+                  bg-[#111111] text-white rounded-[10px] rounded-br-[4px]">
                   {msg.text}
                 </div>
               ) : (
-                <div className="bezel-outer max-w-[75%] bubble-animate">
-                  <div className="bezel-inner rounded-[19px] px-4 py-2.5 text-sm leading-relaxed text-white/85 prose-chat">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
-                  </div>
+                <div className="max-w-[72%] px-4 py-2.5 text-sm leading-relaxed bubble-animate
+                  bg-white border border-[#EAEAEA] rounded-[10px] rounded-bl-[4px]
+                  text-[#111111] prose-chat
+                  transition-shadow duration-200 hover:shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
                 </div>
               )}
             </div>
           )
         })}
 
-        {/* Loading dots — solo durante Phase 1 (antes del primer token) */}
+        {/* Loading dots */}
         {loading && (
-          <div className="flex gap-2.5 justify-start">
-            <div className="w-7 h-7 rounded-full bg-unicaja/15 border border-unicaja/30 flex items-center justify-center flex-none text-[10px] font-bold text-unicaja">
+          <div className="flex gap-3 justify-start">
+            <div className="w-7 h-7 rounded-[6px] bg-[#EDF3EC] border border-[#C6DEC5]
+              flex items-center justify-center flex-none
+              text-[10px] font-semibold text-[#346538]">
               AI
             </div>
-            <div className="bezel-outer bubble-animate">
-              <div className="bezel-inner rounded-[19px] px-4 py-3 flex gap-1.5 items-center">
-                <span className="w-1.5 h-1.5 rounded-full bg-unicaja/50" style={{ animation: 'dot-bounce 1.2s 0ms cubic-bezier(0.32,0.72,0,1) infinite' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-unicaja/50" style={{ animation: 'dot-bounce 1.2s 150ms cubic-bezier(0.32,0.72,0,1) infinite' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-unicaja/50" style={{ animation: 'dot-bounce 1.2s 300ms cubic-bezier(0.32,0.72,0,1) infinite' }} />
-              </div>
+            <div className="bg-white border border-[#EAEAEA] rounded-[10px] rounded-bl-[4px]
+              px-4 py-3 flex gap-1.5 items-center bubble-animate">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#111111]" style={{ animation: 'dot-bounce 1.2s 0ms cubic-bezier(0.16,1,0.3,1) infinite' }} />
+              <span className="w-1.5 h-1.5 rounded-full bg-[#111111]" style={{ animation: 'dot-bounce 1.2s 150ms cubic-bezier(0.16,1,0.3,1) infinite' }} />
+              <span className="w-1.5 h-1.5 rounded-full bg-[#111111]" style={{ animation: 'dot-bounce 1.2s 300ms cubic-bezier(0.16,1,0.3,1) infinite' }} />
             </div>
           </div>
         )}
@@ -236,17 +237,17 @@ export default function ChatBox() {
       </div>
 
       {/* Suggestions */}
-      <div className="flex gap-2 px-4 py-2 overflow-x-auto scrollbar-hide flex-none">
+      <div className="flex gap-2 px-6 py-2 overflow-x-auto scrollbar-hide flex-none border-t border-[#EAEAEA]">
         {SUGGESTIONS.map((s, i) => (
           <button
             key={i}
             onClick={() => handleSend(s)}
             disabled={loading}
-            className="flex-none text-xs font-medium text-white/60 bg-white/5 border border-white/10
-              rounded-full px-3 py-1.5 whitespace-nowrap cursor-pointer
-              hover:bg-unicaja/15 hover:text-unicaja hover:border-unicaja/30
-              transition-all duration-300 ease-spring
-              disabled:opacity-30"
+            className="flex-none text-xs font-medium text-[#787774]
+              bg-white border border-[#EAEAEA] rounded-[6px] px-3 py-1.5 whitespace-nowrap cursor-pointer
+              hover:border-[#111111] hover:text-[#111111]
+              transition-all duration-200 ease-spring
+              disabled:opacity-40"
           >
             {s}
           </button>
@@ -254,37 +255,31 @@ export default function ChatBox() {
       </div>
 
       {/* Input */}
-      <div className="flex-none px-3 pb-3 pt-1">
-        <div className="bezel-outer">
-          <div className="bezel-inner rounded-[19px] px-3 py-2 flex gap-2 items-center">
-            <input
-              className="flex-1 bg-transparent border-none outline-none text-sm text-white/85
-                placeholder-white/25 caret-unicaja"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              placeholder="Escribe tu consulta financiera..."
-              disabled={loading}
-            />
-            <button
-              onClick={() => handleSend()}
-              disabled={loading || !input.trim()}
-              className="flex-none bg-unicaja/15 border border-unicaja/35 rounded-[14px] p-0.5
-                transition-all duration-300 ease-spring
-                hover:bg-unicaja/20 hover:border-unicaja/50
-                active:scale-[0.98]
-                disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
-            >
-              <span className="flex items-center gap-1.5 bg-unicaja rounded-[12px] px-4 py-2
-                text-white text-sm font-semibold">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
-                </svg>
-                Enviar
-              </span>
-            </button>
-          </div>
-        </div>
+      <div className="flex-none px-6 py-4 border-t border-[#EAEAEA] bg-white flex gap-3 items-center">
+        <input
+          className="flex-1 bg-transparent border-none outline-none text-sm text-[#111111]
+            placeholder-[#787774] caret-[#111111]"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+          placeholder="Escribe tu consulta financiera..."
+          disabled={loading}
+        />
+        <button
+          onClick={() => handleSend()}
+          disabled={loading || !input.trim()}
+          className="flex-none bg-[#111111] text-white text-sm font-medium
+            px-4 py-2 rounded-[6px] cursor-pointer
+            hover:bg-[#333333] active:scale-[0.98]
+            transition-all duration-200 ease-spring
+            disabled:opacity-30 disabled:cursor-not-allowed
+            flex items-center gap-1.5"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+          </svg>
+          Enviar
+        </button>
       </div>
     </div>
   )
