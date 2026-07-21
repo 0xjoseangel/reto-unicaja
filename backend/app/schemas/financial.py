@@ -47,6 +47,7 @@ class ChatRequest(BaseModel):
     message: str
     user_id: int = 1
     history: list[HistoryMessage] = []
+    voice_mode: bool = False
 
 
 class PendingBizumAction(BaseModel):

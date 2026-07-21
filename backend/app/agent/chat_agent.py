@@ -662,6 +662,20 @@ _MARKER = "\n---JSON---\n"
 
 COMBINED_PROMPT = "Escribe ahora la respuesta al usuario."
 
+COMBINED_PROMPT_VOICE = """Escribe ahora la respuesta al usuario en MODO VOZ.
+
+REGLAS ESTRICTAS PARA MODO VOZ:
+- Responde de forma completamente conversacional, como si hablaras en voz alta.
+- PROHIBIDO usar markdown: sin asteriscos, sin guiones de lista, sin almohadillas, sin tablas, sin comillas de código.
+- Las cifras exprésalas de forma natural: "dos mil trescientos euros", "un 8 por ciento".
+- Máximo 3 o 4 frases. La respuesta se leerá en voz alta: que sea breve y fluida.
+- Si hay varios puntos, únelos con "y", "además" o "por otro lado" en lugar de hacer lista.
+- El bloque JSON al final es obligatorio igual que siempre (para pintar el gráfico en pantalla).
+
+Ejemplo correcto: "Tu cartera vale doce mil euros, con una ganancia total del ocho por ciento. El activo que mejor va es Apple, con un veinte por ciento de rentabilidad."
+Ejemplo incorrecto: "**Cartera:** - Apple: +20% - Microsoft: +5%"
+"""
+
 
 async def _run_tool_loop_async(messages: list[dict], model: str) -> list[dict]:
     """Phase 1: tool-calling loop ejecutado en un thread. Devuelve los mensajes actualizados."""
@@ -741,7 +755,7 @@ def _parse_chart(raw_chart: list | str) -> list[dict]:
     return normalized
 
 
-async def process_chat_stream(message: str, user_id: int = 1, history: list[dict] | None = None):
+async def process_chat_stream(message: str, user_id: int = 1, history: list[dict] | None = None, voice_mode: bool = False):
     """Async generator — SSE: tokens de texto + evento done. Una sola llamada al modelo en Phase 2."""
     if settings.ai_provider == "claude" and not settings.anthropic_api_key:
         yield f"data: {json.dumps({'type': 'error', 'text': 'API key de Anthropic no configurada'})}\n\n"
@@ -764,7 +778,8 @@ async def process_chat_stream(message: str, user_id: int = 1, history: list[dict
         return
 
     # Phase 2: streaming combinado — texto + separador + JSON en una sola llamada
-    combined_messages = messages + [{"role": "user", "content": COMBINED_PROMPT}]
+    prompt = COMBINED_PROMPT_VOICE if voice_mode else COMBINED_PROMPT
+    combined_messages = messages + [{"role": "user", "content": prompt}]
     accumulated = ""   # todo el contenido acumulado del stream
     text_yielded = 0   # cuántos caracteres de texto hemos enviado ya
     json_found = False

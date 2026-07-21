@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import chat, transactions
+from app.api.routes import chat, transactions, voice
 from app.core.config import settings
 from app.core.database import Base, engine
 
@@ -19,6 +19,7 @@ app.add_middleware(
 
 app.include_router(transactions.router)
 app.include_router(chat.router)
+app.include_router(voice.router)
 
 
 @app.get("/")

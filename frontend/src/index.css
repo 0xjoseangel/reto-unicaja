@@ -127,6 +127,23 @@ body {
   40%           { transform: translateY(-4px); opacity: 0.8; }
 }
 
+/* ── Voice orb animations ───────────────────────────────────────── */
+@keyframes orb-idle {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 24px 6px rgba(0, 166, 81, 0.35);
+  }
+  50% {
+    transform: scale(1.05);
+    box-shadow: 0 0 40px 12px rgba(0, 166, 81, 0.55);
+  }
+}
+
+@keyframes orb-spin {
+  0%   { transform: scale(1.06) rotate(0deg); }
+  100% { transform: scale(1.06) rotate(360deg); }
+}
+
 /* ── Scrollbar ──────────────────────────────────────────────────── */
 ::-webkit-scrollbar       { width: 3px; height: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }

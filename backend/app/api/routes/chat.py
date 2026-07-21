@@ -17,7 +17,7 @@ async def chat(request: ChatRequest):
 async def chat_stream(request: ChatRequest):
     history = [m.model_dump() for m in request.history]
     return StreamingResponse(
-        process_chat_stream(request.message, request.user_id, history),
+        process_chat_stream(request.message, request.user_id, history, request.voice_mode),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

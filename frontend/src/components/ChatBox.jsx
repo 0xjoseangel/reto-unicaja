@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
 import InvestmentConfirmModal from './InvestmentConfirmModal'
+import VoiceModal from './VoiceModal'
 
 const SUGGESTIONS = [
   '¿Cuál es mi saldo actual?',
@@ -24,6 +25,7 @@ export default function ChatBox() {
   const [loading, setLoading] = useState(false)
   const [pendingBizum, setPendingBizum] = useState(null)
   const [pendingInvestment, setPendingInvestment] = useState(null)
+  const [voiceOpen, setVoiceOpen] = useState(false)
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -153,6 +155,22 @@ export default function ChatBox() {
     setMessages(prev => [...prev, { role: 'assistant', text: 'Compra cancelada.' }])
   }
 
+  function handleVoiceComplete({ userText, assistantText, chartType, chartData, chartTitle }) {
+    const newMessages = [
+      { role: 'user', text: userText },
+      { role: 'assistant', text: assistantText },
+    ]
+    if (chartType && chartData?.length) {
+      newMessages.push({ role: 'chart', chart: { type: chartType, data: chartData, title: chartTitle } })
+    }
+    setMessages(prev => [...prev, ...newMessages])
+    setHistory(prev => [
+      ...prev,
+      { role: 'user', content: userText },
+      { role: 'assistant', content: assistantText },
+    ])
+  }
+
   return (
     <div className="flex flex-col h-full bg-[#FBFBFA] relative">
       {pendingBizum && (
@@ -162,6 +180,13 @@ export default function ChatBox() {
           concept={pendingBizum.concept}
           onConfirm={handleBizumConfirm}
           onCancel={handleBizumCancel}
+        />
+      )}
+      {voiceOpen && (
+        <VoiceModal
+          history={history}
+          onClose={() => setVoiceOpen(false)}
+          onComplete={handleVoiceComplete}
         />
       )}
       {pendingInvestment && (
@@ -265,6 +290,21 @@ export default function ChatBox() {
           placeholder="Escribe tu consulta financiera..."
           disabled={loading}
         />
+        <button
+          onClick={() => setVoiceOpen(true)}
+          disabled={loading}
+          title="Hablar con el asistente"
+          className="flex-none w-9 h-9 rounded-[6px] border border-[#EAEAEA]
+            flex items-center justify-center text-[#787774] cursor-pointer
+            hover:border-[#111111] hover:text-[#111111]
+            transition-all duration-200 ease-spring
+            disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round"
+              d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+          </svg>
+        </button>
         <button
           onClick={() => handleSend()}
           disabled={loading || !input.trim()}

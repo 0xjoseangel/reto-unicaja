@@ -12,6 +12,7 @@ export default defineConfig({
     proxy: {
       '/chat': backendUrl,
       '/transactions': backendUrl,
+      '/voice': backendUrl,
     },
   },
 })
