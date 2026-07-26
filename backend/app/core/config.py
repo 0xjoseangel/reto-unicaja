@@ -5,22 +5,25 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/db.sqlite3"
     app_name: str = "Habla con tu dinero"
 
-    # Proveedor: "claude" | "ollama" | "groq"
-    ai_provider: str = "claude"
+    # Modelo en formato litellm: "anthropic/claude-haiku-4-5", "ollama/llama3.2", etc.
+    litellm_model: str = "anthropic/claude-haiku-4-5"
 
-    # Claude (Anthropic)
+    # API keys — litellm las lee nativas de estas variables de entorno
     anthropic_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-6"
-
-    # Ollama (local)
-    ollama_base_url: str = "http://ollama:11434"
-    ollama_model: str = "qwen2.5:7b"
-
-    # Groq (legado)
+    openai_api_key: str = ""
     groq_api_key: str = ""
+    gemini_api_key: str = ""
+    mistral_api_key: str = ""
+
+    # Para Ollama o endpoints custom (ej: http://ollama:11434)
+    litellm_api_base: str = ""
+
+    # Voz
+    model_cache_dir: str = "/tmp/models"
 
     class Config:
         env_file = ".env"
+        extra = "ignore"  # ignora variables desconocidas en .env
 
 
 settings = Settings()

@@ -486,15 +486,40 @@ TOOL_MAP = {
 # ── Cliente litellm ───────────────────────────────────────────────────────────
 
 def _build_model() -> str:
-    if settings.ai_provider == "claude":
+    """Devuelve el string de modelo litellm y configura las env vars necesarias."""
+    model = settings.litellm_model
+    if settings.anthropic_api_key:
         os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
-        return f"anthropic/{settings.claude_model}"
-    if settings.ai_provider == "ollama":
-        os.environ["OLLAMA_API_BASE"] = settings.ollama_base_url
-        return f"ollama/{settings.ollama_model}"
-    # groq (legado)
-    os.environ["GROQ_API_KEY"] = settings.groq_api_key
-    return "groq/llama-3.3-70b-versatile"
+    if settings.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    if settings.groq_api_key:
+        os.environ["GROQ_API_KEY"] = settings.groq_api_key
+    if settings.gemini_api_key:
+        os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
+    if settings.mistral_api_key:
+        os.environ["MISTRAL_API_KEY"] = settings.mistral_api_key
+    if settings.litellm_api_base:
+        os.environ["OLLAMA_API_BASE"] = settings.litellm_api_base
+    return model
+
+
+def _is_claude(model: str) -> bool:
+    return model.startswith("anthropic/")
+
+
+def _check_api_key(model: str) -> str | None:
+    """Devuelve mensaje de error si falta la API key del proveedor, None si todo OK."""
+    key_map = {
+        "anthropic": settings.anthropic_api_key,
+        "openai":    settings.openai_api_key,
+        "groq":      settings.groq_api_key,
+        "gemini":    settings.gemini_api_key,
+        "mistral":   settings.mistral_api_key,
+    }
+    provider = model.split("/")[0] if "/" in model else ""
+    if provider in key_map and not key_map[provider]:
+        return f"API key de {provider} no configurada. Ejecuta ./setup.sh o edita backend/.env"
+    return None
 
 
 # ── Bucle agente ──────────────────────────────────────────────────────────────
@@ -574,8 +599,8 @@ def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
     messages.append({"role": "user", "content": FINAL_PROMPT})
 
     kwargs: dict = {"model": model, "messages": messages}
-    # Claude no soporta response_format; para Groq/Ollama lo mantenemos como ayuda
-    if settings.ai_provider != "claude":
+    # Claude no soporta response_format; el resto de proveedores sí
+    if not _is_claude(model):
         kwargs["response_format"] = {"type": "json_object"}
 
     final_response = litellm.completion(**kwargs)
@@ -757,14 +782,11 @@ def _parse_chart(raw_chart: list | str) -> list[dict]:
 
 async def process_chat_stream(message: str, user_id: int = 1, history: list[dict] | None = None, voice_mode: bool = False):
     """Async generator — SSE: tokens de texto + evento done. Una sola llamada al modelo en Phase 2."""
-    if settings.ai_provider == "claude" and not settings.anthropic_api_key:
-        yield f"data: {json.dumps({'type': 'error', 'text': 'API key de Anthropic no configurada'})}\n\n"
-        return
-    if settings.ai_provider == "groq" and not settings.groq_api_key:
-        yield f"data: {json.dumps({'type': 'error', 'text': 'API key de Groq no configurada'})}\n\n"
-        return
-
     model = _build_model()
+    key_error = _check_api_key(model)
+    if key_error:
+        yield f"data: {json.dumps({'type': 'error', 'text': key_error})}\n\n"
+        return
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in (history or []):
         messages.append({"role": msg["role"], "content": msg["content"]})
@@ -850,14 +872,10 @@ async def process_chat_stream(message: str, user_id: int = 1, history: list[dict
 
 
 async def process_chat(message: str, user_id: int = 1, history: list[dict] | None = None) -> ChatResponse:
-    if settings.ai_provider == "claude" and not settings.anthropic_api_key:
-        return ChatResponse(
-            response="API key de Anthropic no configurada. Añade ANTHROPIC_API_KEY al archivo backend/.env"
-        )
-    if settings.ai_provider == "groq" and not settings.groq_api_key:
-        return ChatResponse(
-            response="API key de Groq no configurada. Añade GROQ_API_KEY al archivo backend/.env"
-        )
+    model = _build_model()
+    key_error = _check_api_key(model)
+    if key_error:
+        return ChatResponse(response=key_error)
 
     try:
         return await asyncio.to_thread(_run_chat, message, user_id, history or [])
