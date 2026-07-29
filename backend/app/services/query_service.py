@@ -54,8 +54,7 @@ def get_transactions(
 ) -> list[TransactionOut]:
     query = (
         db.query(Transaction)
-        .join(Account)
-        .filter(Account.user_id == user_id)
+        .filter(Transaction.user_id == user_id)
     )
     if category:
         query = query.filter(Transaction.category == category)
@@ -68,13 +67,12 @@ def get_transactions(
 
 def get_summary(db: Session, user_id: int) -> SummaryOut:
     accounts = db.query(Account).filter(Account.user_id == user_id).all()
-    account_ids = [a.id for a in accounts]
     total_balance = sum(a.balance for a in accounts)
 
     income = (
         db.query(func.sum(Transaction.amount))
         .filter(
-            Transaction.account_id.in_(account_ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "ingreso",
         )
         .scalar() or 0.0
@@ -82,21 +80,21 @@ def get_summary(db: Session, user_id: int) -> SummaryOut:
     expenses = (
         db.query(func.sum(Transaction.amount))
         .filter(
-            Transaction.account_id.in_(account_ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
         )
         .scalar() or 0.0
     )
     count = (
         db.query(func.count(Transaction.id))
-        .filter(Transaction.account_id.in_(account_ids))
+        .filter(Transaction.user_id == user_id)
         .scalar() or 0
     )
 
     top_cats = (
         db.query(Transaction.category, func.sum(Transaction.amount).label("total"))
         .filter(
-            Transaction.account_id.in_(account_ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
         )
         .group_by(Transaction.category)
@@ -117,7 +115,6 @@ def get_summary(db: Session, user_id: int) -> SummaryOut:
 def process_chat(db: Session, message: str, user_id: int) -> ChatResponse:
     msg = message.lower()
     accounts = db.query(Account).filter(Account.user_id == user_id).all()
-    account_ids = [a.id for a in accounts]
     start_date, end_date = _detect_period(message)
     category = _detect_category(message)
 
@@ -130,7 +127,7 @@ def process_chat(db: Session, message: str, user_id: int) -> ChatResponse:
                 func.sum(Transaction.amount).label("total"),
             )
             .filter(
-                Transaction.account_id.in_(account_ids),
+                Transaction.user_id == user_id,
                 Transaction.category == category,
             )
             .group_by("year", "month")
@@ -152,7 +149,7 @@ def process_chat(db: Session, message: str, user_id: int) -> ChatResponse:
         total = (
             db.query(func.sum(Transaction.amount))
             .filter(
-                Transaction.account_id.in_(account_ids),
+                Transaction.user_id == user_id,
                 Transaction.category == category,
                 Transaction.transaction_type == "gasto",
                 Transaction.date >= start_date,
@@ -189,7 +186,7 @@ def process_chat(db: Session, message: str, user_id: int) -> ChatResponse:
         rows = (
             db.query(Transaction.category, func.sum(Transaction.amount).label("total"))
             .filter(
-                Transaction.account_id.in_(account_ids),
+                Transaction.user_id == user_id,
                 Transaction.transaction_type == "gasto",
                 Transaction.date >= start_date,
                 Transaction.date <= end_date,
@@ -212,7 +209,7 @@ def process_chat(db: Session, message: str, user_id: int) -> ChatResponse:
         total = (
             db.query(func.sum(Transaction.amount))
             .filter(
-                Transaction.account_id.in_(account_ids),
+                Transaction.user_id == user_id,
                 Transaction.transaction_type == "ingreso",
                 Transaction.date >= start_date,
                 Transaction.date <= end_date,

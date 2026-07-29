@@ -10,6 +10,7 @@ class TransactionOut(BaseModel):
     amount: float
     transaction_type: str
     category: str
+    merchant: str | None = None
     description: str | None
     date: datetime
 

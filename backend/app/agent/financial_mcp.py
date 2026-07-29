@@ -1,28 +1,19 @@
 """
 MCP Server con las herramientas financieras del proyecto.
-
-Cada función decorada con @mcp.tool() queda registrada en el servidor MCP
-y puede ser descubierta por cualquier cliente MCP compatible.
-Las funciones son también callables normales de Python — el decorador solo las registra,
-no las envuelve ni cambia su comportamiento.
 """
 from datetime import datetime, timedelta
 
 import yfinance as yf
 from mcp.server.fastmcp import FastMCP
-from sqlalchemy import extract, func
+from sqlalchemy import extract, func, or_
 
 from app.core.database import SessionLocal
-from app.models.financial import Account, Investment, Transaction
+from app.models.financial import Account, BizumTransfer, Investment, Transaction
 
 mcp = FastMCP("financial-assistant")
 
 
 # ── Helpers internos ──────────────────────────────────────────────────────────
-
-def _account_ids(db, user_id: int) -> list[int]:
-    return [a.id for a in db.query(Account).filter(Account.user_id == user_id).all()]
-
 
 def _period_dates(period: str) -> tuple[datetime, datetime]:
     now = datetime.now()
@@ -51,26 +42,24 @@ def get_financial_summary(user_id: int = 1) -> dict:
     gastos totales y las 5 categorías en las que más gasta."""
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         accounts = db.query(Account).filter(Account.user_id == user_id).all()
         balance = round(sum(a.balance for a in accounts), 2)
 
         income = db.query(func.sum(Transaction.amount)).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "ingreso",
         ).scalar() or 0.0
 
         expenses = db.query(func.sum(Transaction.amount)).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
         ).scalar() or 0.0
 
-        # Período cubierto por los datos
         first = db.query(func.min(Transaction.date)).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
         ).scalar()
         last = db.query(func.max(Transaction.date)).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
         ).scalar()
 
         months = 1
@@ -82,7 +71,7 @@ def get_financial_summary(user_id: int = 1) -> dict:
             Transaction.category,
             func.sum(Transaction.amount).label("total"),
         ).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
         ).group_by(Transaction.category).order_by(
             func.sum(Transaction.amount).desc()
@@ -116,17 +105,14 @@ def get_expenses_by_category(
     """
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         start, end = _period_dates(period)
-
         total = db.query(func.sum(Transaction.amount)).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.category == category,
             Transaction.transaction_type == "gasto",
             Transaction.date >= start,
             Transaction.date <= end,
         ).scalar() or 0.0
-
         return {"category": category, "total": round(total, 2), "period": period}
     finally:
         db.close()
@@ -138,14 +124,12 @@ def get_monthly_evolution(category: str, user_id: int = 1) -> dict:
     los últimos 12 meses. Ideal para detectar tendencias."""
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
-
         rows = db.query(
             extract("year", Transaction.date).label("year"),
             extract("month", Transaction.date).label("month"),
             func.sum(Transaction.amount).label("total"),
         ).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.category == category,
             Transaction.transaction_type == "gasto",
         ).group_by("year", "month").order_by("year", "month").all()
@@ -170,14 +154,12 @@ def get_category_breakdown(period: str = "current_month", user_id: int = 1) -> d
     """
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         start, end = _period_dates(period)
-
         rows = db.query(
             Transaction.category,
             func.sum(Transaction.amount).label("total"),
         ).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
             Transaction.date >= start,
             Transaction.date <= end,
@@ -209,23 +191,20 @@ def get_transaction_count(
     """
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         start, end = _period_dates(period)
-
         query = db.query(func.count(Transaction.id)).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
             Transaction.date >= start,
             Transaction.date <= end,
         )
         if category:
             query = query.filter(Transaction.category == category)
-
         count = query.scalar() or 0
-
         return {"category": category or "todas", "count": count, "period": period}
     finally:
         db.close()
+
 
 @mcp.tool()
 def search_specific_transactions(
@@ -233,15 +212,17 @@ def search_specific_transactions(
     limit: int = 5,
     user_id: int = 1,
 ) -> dict:
-    """Busca transacciones individuales por palabra clave en la descripción
+    """Busca transacciones individuales por palabra clave en el comercio o descripción
     (ej: 'Netflix', 'Mercadona', 'Luz'). Usa esto cuando el usuario pregunte
     por recibos concretos o un gasto específico."""
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         rows = db.query(Transaction).filter(
-            Transaction.account_id.in_(ids),
-            Transaction.description.ilike(f"%{keyword}%"),
+            Transaction.user_id == user_id,
+            or_(
+                Transaction.merchant.ilike(f"%{keyword}%"),
+                Transaction.description.ilike(f"%{keyword}%"),
+            ),
         ).order_by(Transaction.date.desc()).limit(limit).all()
 
         if not rows:
@@ -252,6 +233,7 @@ def search_specific_transactions(
             "transactions": [
                 {
                     "fecha": r.date.strftime("%Y-%m-%d"),
+                    "comercio": r.merchant,
                     "descripcion": r.description,
                     "monto": round(r.amount, 2),
                     "categoria": r.category,
@@ -269,15 +251,15 @@ def get_recent_transactions(limit: int = 5, user_id: int = 1) -> dict:
     a '¿Cuáles son mis últimos gastos?' o para dar contexto de los últimos días."""
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         rows = db.query(Transaction).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
         ).order_by(Transaction.date.desc()).limit(limit).all()
 
         return {
             "recent_transactions": [
                 {
                     "fecha": r.date.strftime("%Y-%m-%d"),
+                    "comercio": r.merchant,
                     "descripcion": r.description,
                     "monto": round(r.amount, 2),
                     "tipo": r.transaction_type,
@@ -300,10 +282,9 @@ def get_largest_expenses(
     Útil para responder por qué el usuario tiene poco saldo o dónde se le fue el dinero."""
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         start, end = _period_dates(period)
         rows = db.query(Transaction).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
             Transaction.date >= start,
             Transaction.date <= end,
@@ -314,6 +295,7 @@ def get_largest_expenses(
             "largest_expenses": [
                 {
                     "fecha": r.date.strftime("%Y-%m-%d"),
+                    "comercio": r.merchant,
                     "descripcion": r.description,
                     "monto": round(r.amount, 2),
                     "categoria": r.category,
@@ -341,19 +323,19 @@ def get_places_by_category(
     """
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         start, end = _period_dates(period)
         rows = db.query(
-            Transaction.description,
+            Transaction.merchant,
             func.count(Transaction.id).label("visits"),
             func.sum(Transaction.amount).label("total"),
         ).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.category == category,
             Transaction.transaction_type == "gasto",
             Transaction.date >= start,
             Transaction.date <= end,
-        ).group_by(Transaction.description).order_by(
+            Transaction.merchant.isnot(None),
+        ).group_by(Transaction.merchant).order_by(
             func.count(Transaction.id).desc()
         ).all()
 
@@ -362,7 +344,7 @@ def get_places_by_category(
             "period": period,
             "places": [
                 {
-                    "nombre": r.description,
+                    "nombre": r.merchant,
                     "visitas": r.visits,
                     "total_gastado": round(r.total, 2),
                 }
@@ -383,7 +365,6 @@ def get_spending_analysis(user_id: int = 1) -> dict:
     """
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         now = datetime.now()
         current_start = now.replace(day=1)
         eleven_months_ago = current_start - timedelta(days=335)
@@ -392,7 +373,7 @@ def get_spending_analysis(user_id: int = 1) -> dict:
             Transaction.category,
             func.sum(Transaction.amount).label("total"),
         ).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
             Transaction.date >= current_start,
         ).group_by(Transaction.category).all()
@@ -401,7 +382,7 @@ def get_spending_analysis(user_id: int = 1) -> dict:
             Transaction.category,
             func.sum(Transaction.amount).label("total"),
         ).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "gasto",
             Transaction.date >= eleven_months_ago,
             Transaction.date < current_start,
@@ -423,7 +404,6 @@ def get_spending_analysis(user_id: int = 1) -> dict:
             })
 
         analysis.sort(key=lambda x: x["variacion_pct"], reverse=True)
-
         return {"analisis": analysis, "meses_comparados": 11}
     finally:
         db.close()
@@ -474,19 +454,33 @@ def make_bizum_transfer(
             }
 
         account.balance = round(account.balance - amount, 2)
+        now = datetime.now()
+
         transaction = Transaction(
             account_id=account.id,
+            user_id=user_id,
             amount=round(amount, 2),
             transaction_type="gasto",
             category="bizum",
-            description=f"Bizum a {recipient} — {concept}",
-            date=datetime.now(),
+            merchant=recipient,
+            description=concept,
+            source="bizum",
+            date=now,
         )
         db.add(transaction)
-        db.commit()
-        db.refresh(transaction)
 
-        # Saldo total = suma de TODAS las cuentas del usuario
+        bizum_record = BizumTransfer(
+            user_id=user_id,
+            recipient=recipient,
+            amount=round(amount, 2),
+            concept=concept,
+            status="completed",
+            executed_at=now,
+        )
+        db.add(bizum_record)
+
+        db.commit()
+
         all_accounts = db.query(Account).filter(Account.user_id == user_id).all()
         total_balance = round(sum(a.balance for a in all_accounts), 2)
 
@@ -498,7 +492,7 @@ def make_bizum_transfer(
             "nuevo_saldo_total": total_balance,
             "nuevo_saldo_cuenta_corriente": account.balance,
             "nota": "nuevo_saldo_total es la suma de todas tus cuentas.",
-            "fecha": transaction.date.strftime("%Y-%m-%d %H:%M"),
+            "fecha": now.strftime("%Y-%m-%d %H:%M"),
         }
     except Exception as e:
         db.rollback()
@@ -533,12 +527,9 @@ def calculate_mortgage(
 
     monthly_rate = annual_rate_percent / 100 / 12
     n_payments = years * 12
-
-    # Fórmula de cuota fija (sistema francés)
     factor = (1 + monthly_rate) ** n_payments
     monthly_payment = principal * monthly_rate * factor / (factor - 1)
 
-    # Tabla de amortización año a año
     amortization = []
     balance = principal
     for year in range(1, years + 1):
@@ -647,7 +638,6 @@ def calculate_compound_interest(
     }
 
 
-
 @mcp.tool()
 def calculate_savings_goal(
     goal_amount: float,
@@ -722,19 +712,18 @@ def get_income_by_period(period: str = "current_month", user_id: int = 1) -> dic
     """
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
         start, end = _period_dates(period)
-
         rows = db.query(
+            Transaction.merchant,
             Transaction.description,
             func.sum(Transaction.amount).label("total"),
             func.count(Transaction.id).label("count"),
         ).filter(
-            Transaction.account_id.in_(ids),
+            Transaction.user_id == user_id,
             Transaction.transaction_type == "ingreso",
             Transaction.date >= start,
             Transaction.date <= end,
-        ).group_by(Transaction.description).order_by(
+        ).group_by(Transaction.merchant, Transaction.description).order_by(
             func.sum(Transaction.amount).desc()
         ).all()
 
@@ -744,7 +733,12 @@ def get_income_by_period(period: str = "current_month", user_id: int = 1) -> dic
             "period": period,
             "total_ingresos": round(total, 2),
             "detalle": [
-                {"descripcion": r.description, "total": round(r.total, 2), "veces": r.count}
+                {
+                    "comercio": r.merchant,
+                    "descripcion": r.description,
+                    "total": round(r.total, 2),
+                    "veces": r.count,
+                }
                 for r in rows
             ],
         }
@@ -762,7 +756,7 @@ def get_account_balances(user_id: int = 1) -> dict:
     try:
         accounts = db.query(Account).filter(Account.user_id == user_id).all()
         cuentas = [
-            {"tipo": a.account_type, "saldo": round(a.balance, 2)}
+            {"tipo": a.account_type, "nombre": a.name, "saldo": round(a.balance, 2), "moneda": a.currency}
             for a in accounts
         ]
         total = round(sum(a.balance for a in accounts), 2)
@@ -776,18 +770,18 @@ def get_bizum_history(limit: int = 10, user_id: int = 1) -> dict:
     """Obtiene el historial de transferencias Bizum realizadas por el usuario."""
     db = SessionLocal()
     try:
-        ids = _account_ids(db, user_id)
-        rows = db.query(Transaction).filter(
-            Transaction.account_id.in_(ids),
-            Transaction.category == "bizum",
-        ).order_by(Transaction.date.desc()).limit(limit).all()
+        rows = db.query(BizumTransfer).filter(
+            BizumTransfer.user_id == user_id,
+        ).order_by(BizumTransfer.executed_at.desc()).limit(limit).all()
 
         return {
             "bizum_transfers": [
                 {
-                    "fecha": r.date.strftime("%Y-%m-%d %H:%M"),
-                    "descripcion": r.description,
+                    "fecha": r.executed_at.strftime("%Y-%m-%d %H:%M"),
+                    "destinatario": r.recipient,
+                    "concepto": r.concept,
                     "importe": round(r.amount, 2),
+                    "estado": r.status,
                 }
                 for r in rows
             ]
@@ -814,11 +808,11 @@ def get_portfolio(user_id: int = 1) -> dict:
         coste_total = 0.0
 
         for inv in investments:
-            current_price = inv.avg_purchase_price  # fallback
+            current_price = inv.avg_purchase_price
             try:
                 fast = yf.Ticker(inv.ticker).fast_info
                 price = fast.last_price
-                if price and price == price:  # NaN check
+                if price and price == price:
                     current_price = price
             except Exception:
                 pass

@@ -6,8 +6,8 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from app.core.database import Base, SessionLocal, engine
-from app.models.financial import Account, Investment, Transaction, User
+from app.core.database import SessionLocal
+from app.models.financial import Account, Goal, Investment, Transaction, User
 
 EXPENSE_CATEGORIES = {
     "restaurantes": (15, 80),
@@ -31,15 +31,56 @@ EXPENSE_FREQUENCY = {
     "servicios": 1,
 }
 
-EXPENSE_DESCRIPTIONS = {
-    "restaurantes": ["El Rincón de Madrid", "Burger King", "La Taberna", "Sushi Bar", "Pizzería Bella"],
-    "supermercado": ["Mercadona", "Lidl", "Carrefour", "Aldi", "El Corte Inglés alimentación"],
-    "transporte": ["Gasolinera Repsol", "Metro mensual", "Renfe AVE", "Uber", "Bus urbano"],
-    "alquiler": ["Alquiler piso Calle Granada"],
-    "ocio": ["Netflix", "Spotify Premium", "Cine Yelmo", "Concierto", "Librería"],
-    "salud": ["Farmacia Central", "Consulta médico privado", "Dentista"],
-    "ropa": ["Zara", "Mango", "H&M", "El Corte Inglés moda"],
-    "servicios": ["Endesa luz", "Aguas de Granada", "Vodafone internet", "Seguro hogar"],
+# (merchant, description) pairs per category
+EXPENSE_MERCHANTS: dict[str, list[tuple[str, str]]] = {
+    "restaurantes": [
+        ("El Rincón de Madrid", "Menú del día"),
+        ("Burger King", "Combo hamburguesa"),
+        ("La Taberna", "Cena con amigos"),
+        ("Sushi Bar", "Sushi combinado"),
+        ("Pizzería Bella", "Pizza familiar"),
+    ],
+    "supermercado": [
+        ("Mercadona", "Compra semanal"),
+        ("Lidl", "Compra semanal"),
+        ("Carrefour", "Compra mensual"),
+        ("Aldi", "Compra semanal"),
+        ("El Corte Inglés", "Alimentación"),
+    ],
+    "transporte": [
+        ("Repsol", "Gasolina"),
+        ("Metro Granada", "Tarjeta mensual"),
+        ("Renfe", "Billete AVE"),
+        ("Uber", "Viaje urbano"),
+        ("EMT Granada", "Bus urbano"),
+    ],
+    "alquiler": [
+        ("Inmobiliaria Gil", "Alquiler piso Calle Granada"),
+    ],
+    "ocio": [
+        ("Netflix", "Suscripción mensual"),
+        ("Spotify", "Premium mensual"),
+        ("Cine Yelmo", "Entrada cine"),
+        ("Ticketmaster", "Concierto"),
+        ("La Casa del Libro", "Libros"),
+    ],
+    "salud": [
+        ("Farmacia Central", "Medicamentos"),
+        ("Clínica San Juan", "Consulta médico privado"),
+        ("Dentista Marbella", "Revisión dental"),
+    ],
+    "ropa": [
+        ("Zara", "Ropa temporada"),
+        ("Mango", "Ropa temporada"),
+        ("H&M", "Ropa casual"),
+        ("El Corte Inglés", "Ropa y calzado"),
+    ],
+    "servicios": [
+        ("Endesa", "Factura luz"),
+        ("Aguas de Granada", "Factura agua"),
+        ("Vodafone", "Factura internet y móvil"),
+        ("Mapfre", "Seguro hogar"),
+    ],
 }
 
 
@@ -53,7 +94,6 @@ def random_day_in_month(year: int, month: int) -> datetime:
 
 
 def seed():
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
 
     if db.query(User).count() > 0:
@@ -61,16 +101,28 @@ def seed():
         db.close()
         return
 
-    user = User(name="Jose Angel Carretero", email="joseangelcarretero300@gmail.com")
+    now = datetime.now()
+
+    user = User(
+        name="Jose Angel Carretero",
+        email="joseangelcarretero300@gmail.com",
+        password_hash=None,
+        created_at=now,
+    )
     db.add(user)
     db.flush()
 
-    checking = Account(user_id=user.id, name="Cuenta Corriente", account_type="corriente", balance=2850.40)
-    savings = Account(user_id=user.id, name="Cuenta Ahorro", account_type="ahorro", balance=8500.00)
+    checking = Account(
+        user_id=user.id, name="Cuenta Corriente",
+        account_type="corriente", balance=2850.40, currency="EUR",
+    )
+    savings = Account(
+        user_id=user.id, name="Cuenta Ahorro",
+        account_type="ahorro", balance=8500.00, currency="EUR",
+    )
     db.add_all([checking, savings])
     db.flush()
 
-    now = datetime.now()
     transactions = []
 
     for months_back in range(11, -1, -1):
@@ -78,53 +130,86 @@ def seed():
         year, month = target.year, target.month
 
         # Nómina mensual
-        salary = random.uniform(1900, 2100)
+        salary = round(random.uniform(1900, 2100), 2)
         transactions.append(Transaction(
             account_id=checking.id,
-            amount=round(salary, 2),
+            user_id=user.id,
+            amount=salary,
             transaction_type="ingreso",
             category="salario",
-            description="Nómina empresa TechCorp",
+            merchant="TechCorp S.L.",
+            description="Nómina mensual",
+            source="salary",
             date=datetime(year, month, 1, 9, 0),
         ))
 
-        # Ingreso extra ocasional
+        # Ingreso extra ocasional (freelance)
         if random.random() < 0.3:
             transactions.append(Transaction(
                 account_id=savings.id,
+                user_id=user.id,
                 amount=round(random.uniform(100, 500), 2),
                 transaction_type="ingreso",
                 category="salario",
+                merchant="Cliente freelance",
                 description="Trabajo freelance",
+                source="manual",
                 date=random_day_in_month(year, month),
             ))
 
         # Gastos por categoría
         for category, (min_amt, max_amt) in EXPENSE_CATEGORIES.items():
             freq = EXPENSE_FREQUENCY[category]
+            options = EXPENSE_MERCHANTS[category]
             for _ in range(freq):
-                amount = round(random.uniform(min_amt, max_amt), 2)
-                description = random.choice(EXPENSE_DESCRIPTIONS[category])
+                merchant, description = random.choice(options)
                 transactions.append(Transaction(
                     account_id=checking.id,
-                    amount=amount,
+                    user_id=user.id,
+                    amount=round(random.uniform(min_amt, max_amt), 2),
                     transaction_type="gasto",
                     category=category,
+                    merchant=merchant,
                     description=description,
+                    source="manual",
                     date=random_day_in_month(year, month),
                 ))
 
     db.add_all(transactions)
+
+    # Metas de ejemplo
+    goals = [
+        Goal(
+            user_id=user.id,
+            name="Entrada para vivienda",
+            target_amount=30000.00,
+            current_amount=8500.00,
+            deadline=datetime(2027, 12, 31),
+            status="active",
+            created_at=now,
+        ),
+        Goal(
+            user_id=user.id,
+            name="Fondo de emergencia (6 meses)",
+            target_amount=12000.00,
+            current_amount=8500.00,
+            deadline=None,
+            status="active",
+            created_at=now,
+        ),
+    ]
+    db.add_all(goals)
+
     db.commit()
     db.close()
 
-    total = len(transactions)
-    print(f"Seed completado: 1 usuario, 2 cuentas, {total} transacciones generadas.")
+    print(
+        f"Seed completado: 1 usuario, 2 cuentas, {len(transactions)} transacciones, "
+        f"{len(goals)} metas."
+    )
 
 
 def seed_investments():
-    """Añade una cartera de inversiones de ejemplo para el usuario."""
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         if db.query(Investment).count() > 0:
