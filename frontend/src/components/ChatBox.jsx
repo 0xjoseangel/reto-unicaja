@@ -1,6 +1,59 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+function TypewriterText({ text, active }) {
+  // Mensajes históricos (active=false desde el primer render) se muestran al instante
+  const [displayed, setDisplayed] = useState(active ? '' : text)
+  const posRef   = useRef(active ? 0 : text.length)
+  const textRef  = useRef(text)
+  const timerRef = useRef(null)
+
+  useEffect(() => {
+    textRef.current = text
+
+    // Ya alcanzamos o superamos el texto actual — nada que animar
+    if (posRef.current >= text.length) {
+      setDisplayed(text)
+      return
+    }
+
+    // Limpiar timer anterior (necesario para Strict Mode y cambios de text)
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+
+    timerRef.current = setInterval(() => {
+      if (posRef.current >= textRef.current.length) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+        return
+      }
+      posRef.current += 1
+      setDisplayed(textRef.current.slice(0, posRef.current))
+    }, 12)
+
+    return () => {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+  }, [text])
+
+  const showCursor = active && displayed.length < text.length
+
+  return (
+    <>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayed || ' '}</ReactMarkdown>
+      {showCursor && (
+        <span
+          className="inline-block w-px h-3.5 bg-[#787774] ml-0.5 align-middle"
+          style={{ animation: 'cursor-blink 0.7s step-end infinite' }}
+        />
+      )}
+    </>
+  )
+}
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
 import InvestmentConfirmModal from './InvestmentConfirmModal'
@@ -23,6 +76,7 @@ export default function ChatBox() {
   const [history, setHistory] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [streamingMsgIdx, setStreamingMsgIdx] = useState(-1)
   const [pendingBizum, setPendingBizum] = useState(null)
   const [pendingInvestment, setPendingInvestment] = useState(null)
   const [voiceOpen, setVoiceOpen] = useState(false)
@@ -76,7 +130,10 @@ export default function ChatBox() {
           if (event.type === 'token') {
             streamingText += event.text
             if (!assistantAdded) {
-              setMessages(prev => [...prev, { role: 'assistant', text: streamingText }])
+              setMessages(prev => {
+                setStreamingMsgIdx(prev.length)
+                return [...prev, { role: 'assistant', text: streamingText }]
+              })
               assistantAdded = true
               setLoading(false)
             } else {
@@ -90,12 +147,14 @@ export default function ChatBox() {
           } else if (event.type === 'done') {
             if (event.pending_action?.type === 'bizum_confirm') {
               if (assistantAdded) setMessages(prev => prev.slice(0, -1))
+              setStreamingMsgIdx(-1)
               setPendingBizum(event.pending_action)
               setHistory(updatedHistory)
               return
             }
             if (event.pending_action?.type === 'investment_confirm') {
               if (assistantAdded) setMessages(prev => prev.slice(0, -1))
+              setStreamingMsgIdx(-1)
               setPendingInvestment(event.pending_action)
               setHistory(updatedHistory)
               return
@@ -130,6 +189,7 @@ export default function ChatBox() {
       ])
     } finally {
       setLoading(false)
+      setStreamingMsgIdx(-1)
     }
   }
 
@@ -235,7 +295,10 @@ export default function ChatBox() {
                   bg-white border border-[#EAEAEA] rounded-[10px] rounded-bl-[4px]
                   text-[#111111] prose-chat
                   transition-shadow duration-200 hover:shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                  <TypewriterText
+                    text={msg.text}
+                    active={i === streamingMsgIdx}
+                  />
                 </div>
               )}
             </div>

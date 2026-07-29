@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import InlineChart from './InlineChart'
+import BizumConfirmModal from './BizumConfirmModal'
+import InvestmentConfirmModal from './InvestmentConfirmModal'
 
 const PHASES = {
   idle: {
@@ -40,12 +42,16 @@ export default function VoiceModal({ history, onClose, onComplete }) {
   const [phase, setPhase] = useState('idle')
   const [orbScale, setOrbScale] = useState(1)
   const [chartInfo, setChartInfo] = useState(null)
+  const [pendingBizum, setPendingBizum] = useState(null)
+  const [pendingInvestment, setPendingInvestment] = useState(null)
 
   const mediaRecorderRef = useRef(null)
   const audioChunksRef   = useRef([])
   const streamRef        = useRef(null)
   const audioCtxRef      = useRef(null)
   const animFrameRef     = useRef(null)
+  // Stores context needed to complete the confirmation flow
+  const pendingContextRef = useRef(null)
 
   useEffect(() => {
     return () => {
@@ -115,7 +121,6 @@ export default function VoiceModal({ history, onClose, onComplete }) {
 
   async function processAudio(audioBlob) {
     try {
-      // 1. Transcribir con Whisper
       const form = new FormData()
       form.append('file', audioBlob, 'audio.webm')
       const txRes = await fetch('/voice/transcribe', { method: 'POST', body: form })
@@ -123,20 +128,108 @@ export default function VoiceModal({ history, onClose, onComplete }) {
       const { text: userText } = await txRes.json()
       if (!userText.trim()) { setPhase('idle'); return }
 
-      // 2. Enviar al agente de chat (SSE stream, voice_mode activa respuesta conversacional)
+      await sendToAgent(userText, history || [])
+    } catch (err) {
+      console.error('[VoiceModal]', err)
+      setPhase('idle')
+    }
+  }
+
+  async function sendToAgent(userText, currentHistory) {
+    const chatRes = await fetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: userText, user_id: 1, history: currentHistory, voice_mode: true }),
+    })
+    if (!chatRes.ok) throw new Error('Chat fallido')
+
+    const reader = chatRes.body.getReader()
+    const decoder = new TextDecoder()
+    let assistantText = ''
+    let chartType = null, chartData = null, chartTitle = null
+    let buf = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const ev = JSON.parse(line.slice(6).trim())
+          if (ev.type === 'token') {
+            assistantText += ev.text
+          } else if (ev.type === 'done') {
+            if (ev.pending_action?.type === 'bizum_confirm') {
+              pendingContextRef.current = {
+                userText,
+                updatedHistory: [...currentHistory, { role: 'user', content: userText }],
+              }
+              setPendingBizum(ev.pending_action)
+              setPhase('idle')
+              return
+            }
+            if (ev.pending_action?.type === 'investment_confirm') {
+              pendingContextRef.current = {
+                userText,
+                updatedHistory: [...currentHistory, { role: 'user', content: userText }],
+              }
+              setPendingInvestment(ev.pending_action)
+              setPhase('idle')
+              return
+            }
+            if (ev.chart_type && ev.chart_data?.length) {
+              chartType = ev.chart_type
+              chartData = ev.chart_data
+              chartTitle = ev.chart_title
+              setChartInfo({ type: chartType, data: chartData, title: chartTitle })
+            }
+          }
+        } catch {}
+      }
+    }
+
+    onComplete({ userText, assistantText: assistantText.trim(), chartType, chartData, chartTitle })
+    await speakText(assistantText.trim())
+  }
+
+  async function speakText(text) {
+    setPhase('speaking')
+    try {
+      const ttsRes = await fetch('/voice/synthesize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      if (!ttsRes.ok) { setPhase('idle'); return }
+      const audioData = await ttsRes.arrayBuffer()
+      const audioUrl = URL.createObjectURL(new Blob([audioData], { type: 'audio/wav' }))
+      const audio = new Audio(audioUrl)
+      audio.onended = () => { URL.revokeObjectURL(audioUrl); setPhase('idle') }
+      audio.onerror = () => { URL.revokeObjectURL(audioUrl); setPhase('idle') }
+      audio.play()
+    } catch {
+      setPhase('idle')
+    }
+  }
+
+  async function handleBizumConfirm() {
+    const { recipient, amount, concept } = pendingBizum
+    const { userText, updatedHistory } = pendingContextRef.current
+    setPendingBizum(null)
+    setPhase('processing')
+    try {
+      const confirmText = `Sí, confirma el Bizum de ${amount}€ a ${recipient} por ${concept}`
       const chatRes = await fetch('/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userText, user_id: 1, history: history || [], voice_mode: true }),
+        body: JSON.stringify({ message: confirmText, user_id: 1, history: updatedHistory, voice_mode: true }),
       })
-      if (!chatRes.ok) throw new Error('Chat fallido')
-
       const reader = chatRes.body.getReader()
       const decoder = new TextDecoder()
-      let assistantText = ''
-      let chartType = null
-      let chartData = null
-      let chartTitle = null
+      let confirmResponse = ''
       let buf = ''
       while (true) {
         const { done, value } = await reader.read()
@@ -148,45 +241,66 @@ export default function VoiceModal({ history, onClose, onComplete }) {
           if (!line.startsWith('data: ')) continue
           try {
             const ev = JSON.parse(line.slice(6).trim())
-            if (ev.type === 'token') assistantText += ev.text
-            else if (ev.type === 'done') {
-              if (ev.chart_type && ev.chart_data?.length) {
-                chartType = ev.chart_type
-                chartData = ev.chart_data
-                chartTitle = ev.chart_title
-                setChartInfo({ type: chartType, data: chartData, title: chartTitle })
-              }
-            }
+            if (ev.type === 'token') confirmResponse += ev.text
           } catch {}
         }
       }
-
-      // 3. Notificar al padre para añadir mensajes al chat (y gráfica si hay)
-      onComplete({ userText, assistantText: assistantText.trim(), chartType, chartData, chartTitle })
-
-      // 4. Sintetizar respuesta con Piper TTS
-      setPhase('speaking')
-      const ttsRes = await fetch('/voice/synthesize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: assistantText }),
-      })
-      if (!ttsRes.ok) throw new Error('TTS fallido')
-
-      const audioData = await ttsRes.arrayBuffer()
-      const audioUrl = URL.createObjectURL(new Blob([audioData], { type: 'audio/wav' }))
-      const audio = new Audio(audioUrl)
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl)
-        setPhase('idle')
-      }
-      audio.onerror = () => { URL.revokeObjectURL(audioUrl); setPhase('idle') }
-      audio.play()
-
-    } catch (err) {
-      console.error('[VoiceModal]', err)
+      onComplete({ userText, assistantText: confirmResponse.trim() })
+      await speakText(confirmResponse.trim())
+    } catch {
       setPhase('idle')
     }
+  }
+
+  async function handleBizumCancel() {
+    const { userText } = pendingContextRef.current
+    setPendingBizum(null)
+    onComplete({ userText, assistantText: 'Bizum cancelado.' })
+    await speakText('Bizum cancelado.')
+  }
+
+  async function handleInvestmentConfirm() {
+    const { ticker, shares, avg_purchase_price } = pendingInvestment
+    const { userText, updatedHistory } = pendingContextRef.current
+    setPendingInvestment(null)
+    setPhase('processing')
+    try {
+      const confirmText = `Sí, confirma la compra de ${shares} acciones de ${ticker} a ${avg_purchase_price} por acción`
+      const chatRes = await fetch('/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: confirmText, user_id: 1, history: updatedHistory, voice_mode: true }),
+      })
+      const reader = chatRes.body.getReader()
+      const decoder = new TextDecoder()
+      let confirmResponse = ''
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const ev = JSON.parse(line.slice(6).trim())
+            if (ev.type === 'token') confirmResponse += ev.text
+          } catch {}
+        }
+      }
+      onComplete({ userText, assistantText: confirmResponse.trim() })
+      await speakText(confirmResponse.trim())
+    } catch {
+      setPhase('idle')
+    }
+  }
+
+  async function handleInvestmentCancel() {
+    const { userText } = pendingContextRef.current
+    setPendingInvestment(null)
+    onComplete({ userText, assistantText: 'Compra cancelada.' })
+    await speakText('Compra cancelada.')
   }
 
   function handleOrbClick() {
@@ -215,6 +329,28 @@ export default function VoiceModal({ history, onClose, onComplete }) {
       className="absolute inset-0 z-50 flex flex-col items-center overflow-y-auto"
       style={{ background: 'rgba(251,251,250,0.95)', backdropFilter: 'blur(10px)' }}
     >
+      {/* Confirmation modals — overlay inside the voice modal */}
+      {pendingBizum && (
+        <BizumConfirmModal
+          recipient={pendingBizum.recipient}
+          amount={pendingBizum.amount}
+          concept={pendingBizum.concept}
+          onConfirm={handleBizumConfirm}
+          onCancel={handleBizumCancel}
+        />
+      )}
+      {pendingInvestment && (
+        <InvestmentConfirmModal
+          ticker={pendingInvestment.ticker}
+          nombre={pendingInvestment.nombre}
+          shares={pendingInvestment.shares}
+          avgPrice={pendingInvestment.avg_purchase_price}
+          investmentType={pendingInvestment.investment_type}
+          onConfirm={handleInvestmentConfirm}
+          onCancel={handleInvestmentCancel}
+        />
+      )}
+
       {/* Close */}
       <button
         onClick={onClose}
@@ -227,7 +363,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
         </svg>
       </button>
 
-      {/* Orb + status — siempre centrado verticalmente cuando no hay gráfica */}
+      {/* Orb + status */}
       <div className={`flex flex-col items-center ${chartInfo ? 'pt-12' : 'flex-1 justify-center'}`}>
         <button style={orbStyle} onClick={handleOrbClick} disabled={!cfg.clickable} />
 
@@ -246,7 +382,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
         </div>
       </div>
 
-      {/* Gráfica — aparece debajo del orbe cuando hay datos */}
+      {/* Chart — aparece debajo del orbe cuando hay datos */}
       {chartInfo && (
         <div className="w-full px-4 pb-8 pt-6 bubble-animate">
           <InlineChart
