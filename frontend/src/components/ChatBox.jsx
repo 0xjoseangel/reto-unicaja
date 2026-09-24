@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { apiStream } from '../services/api'
 
 function TypewriterText({ text, active }) {
   // Mensajes históricos (active=false desde el primer render) se muestran al instante
@@ -97,11 +98,7 @@ export default function ChatBox() {
     const updatedHistory = [...history, { role: 'user', content: message }]
 
     try {
-      const res = await fetch('/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, user_id: 1, history: updatedHistory }),
-      })
+      const res = await apiStream('/chat/stream', { message, history: updatedHistory })
 
       if (!res.ok) throw new Error('Server error')
 

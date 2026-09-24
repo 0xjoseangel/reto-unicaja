@@ -10,6 +10,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 3000,
     proxy: {
+      '/auth': backendUrl,
       '/chat': backendUrl,
       '/transactions': backendUrl,
       '/voice': backendUrl,

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
 import InvestmentConfirmModal from './InvestmentConfirmModal'
+import { apiFetch, apiStream } from '../services/api'
 
 const PHASES = {
   idle: {
@@ -123,7 +124,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
     try {
       const form = new FormData()
       form.append('file', audioBlob, 'audio.webm')
-      const txRes = await fetch('/voice/transcribe', { method: 'POST', body: form })
+      const txRes = await apiFetch('/voice/transcribe', { method: 'POST', body: form })
       if (!txRes.ok) throw new Error('Transcripción fallida')
       const { text: userText } = await txRes.json()
       if (!userText.trim()) { setPhase('idle'); return }
@@ -136,11 +137,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
   }
 
   async function sendToAgent(userText, currentHistory) {
-    const chatRes = await fetch('/chat/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: userText, user_id: 1, history: currentHistory, voice_mode: true }),
-    })
+    const chatRes = await apiStream('/chat/stream', { message: userText, history: currentHistory, voice_mode: true })
     if (!chatRes.ok) throw new Error('Chat fallido')
 
     const reader = chatRes.body.getReader()
@@ -198,7 +195,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
   async function speakText(text) {
     setPhase('speaking')
     try {
-      const ttsRes = await fetch('/voice/synthesize', {
+      const ttsRes = await apiFetch('/voice/synthesize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
@@ -222,11 +219,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
     setPhase('processing')
     try {
       const confirmText = `Sí, confirma el Bizum de ${amount}€ a ${recipient} por ${concept}`
-      const chatRes = await fetch('/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: confirmText, user_id: 1, history: updatedHistory, voice_mode: true }),
-      })
+      const chatRes = await apiStream('/chat/stream', { message: confirmText, history: updatedHistory, voice_mode: true })
       const reader = chatRes.body.getReader()
       const decoder = new TextDecoder()
       let confirmResponse = ''
@@ -266,11 +259,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
     setPhase('processing')
     try {
       const confirmText = `Sí, confirma la compra de ${shares} acciones de ${ticker} a ${avg_purchase_price} por acción`
-      const chatRes = await fetch('/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: confirmText, user_id: 1, history: updatedHistory, voice_mode: true }),
-      })
+      const chatRes = await apiStream('/chat/stream', { message: confirmText, history: updatedHistory, voice_mode: true })
       const reader = chatRes.body.getReader()
       const decoder = new TextDecoder()
       let confirmResponse = ''

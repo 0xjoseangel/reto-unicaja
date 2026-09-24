@@ -1,6 +1,12 @@
+import { useAuth } from './context/AuthContext'
 import ChatBox from './components/ChatBox'
+import LoginPage from './components/LoginPage'
 
 export default function App() {
+  const { token, user, logout } = useAuth()
+
+  if (!token) return <LoginPage />
+
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-[#FBFBFA]">
       {/* Top bar */}
@@ -11,9 +17,22 @@ export default function App() {
           </p>
           <h1 className="text-sm font-semibold text-[#111111] leading-tight">Asistente Financiero</h1>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#346538] glow-pulse" />
-          <span className="text-xs text-[#787774]">Activo</span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#346538] glow-pulse" />
+            <span className="text-xs text-[#787774]">Activo</span>
+          </div>
+          {user && (
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-[#787774]">{user.name}</span>
+              <button
+                onClick={logout}
+                className="text-xs text-[#787774] hover:text-[#111111] transition-colors duration-150 cursor-pointer"
+              >
+                Salir
+              </button>
+            </div>
+          )}
         </div>
       </header>
 

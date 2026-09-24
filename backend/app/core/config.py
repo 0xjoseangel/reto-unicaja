@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     # Para Ollama o endpoints custom (ej: http://ollama:11434)
     litellm_api_base: str = ""
 
+    # JWT
+    jwt_secret_key: str = "dev-secret-change-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_days: int = 7
+
     # Voz
     model_cache_dir: str = "/tmp/models"
 

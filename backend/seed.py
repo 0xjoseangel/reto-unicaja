@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(__file__))
 
 from app.core.database import SessionLocal
+from app.core.security import hash_password
 from app.models.financial import Account, Goal, Investment, Transaction, User
 
 EXPENSE_CATEGORIES = {
@@ -106,7 +107,7 @@ def seed():
     user = User(
         name="Jose Angel Carretero",
         email="joseangelcarretero300@gmail.com",
-        password_hash=None,
+        password_hash=hash_password("demo1234"),
         created_at=now,
     )
     db.add(user)
@@ -255,6 +256,217 @@ def seed_investments():
         db.close()
 
 
+def _seed_user_transactions(db, user, checking, savings, months: int = 12):
+    """Genera transacciones para un usuario dado con los parámetros de sus cuentas."""
+    transactions = []
+    now = datetime.now()
+
+    for months_back in range(months - 1, -1, -1):
+        target = now - timedelta(days=months_back * 30)
+        year, month = target.year, target.month
+
+        salary = round(random.uniform(1900, 2100), 2)
+        transactions.append(Transaction(
+            account_id=checking.id,
+            user_id=user.id,
+            amount=salary,
+            transaction_type="ingreso",
+            category="salario",
+            merchant="TechCorp S.L.",
+            description="Nómina mensual",
+            source="salary",
+            date=datetime(year, month, 1, 9, 0),
+        ))
+
+        if random.random() < 0.3:
+            transactions.append(Transaction(
+                account_id=savings.id,
+                user_id=user.id,
+                amount=round(random.uniform(100, 500), 2),
+                transaction_type="ingreso",
+                category="salario",
+                merchant="Cliente freelance",
+                description="Trabajo freelance",
+                source="manual",
+                date=random_day_in_month(year, month),
+            ))
+
+        for category, (min_amt, max_amt) in EXPENSE_CATEGORIES.items():
+            freq = EXPENSE_FREQUENCY[category]
+            options = EXPENSE_MERCHANTS[category]
+            for _ in range(freq):
+                merchant, description = random.choice(options)
+                transactions.append(Transaction(
+                    account_id=checking.id,
+                    user_id=user.id,
+                    amount=round(random.uniform(min_amt, max_amt), 2),
+                    transaction_type="gasto",
+                    category=category,
+                    merchant=merchant,
+                    description=description,
+                    source="manual",
+                    date=random_day_in_month(year, month),
+                ))
+
+    db.add_all(transactions)
+    return len(transactions)
+
+
+TEST_USERS = [
+    {
+        "name": "María García López",
+        "email": "maria.garcia@test.com",
+        "password": "test1234",
+        "balance_checking": 1240.80,
+        "balance_savings": 3200.00,
+        "expense_multiplier": 0.75,  # gasta menos — perfil ahorradora
+        "salary_range": (1600, 1800),
+        "goals": [
+            {"name": "Coche nuevo", "target": 15000.0, "current": 3200.0, "deadline": "2026-06-30"},
+        ],
+    },
+    {
+        "name": "Carlos Ruiz Martínez",
+        "email": "carlos.ruiz@test.com",
+        "password": "test1234",
+        "balance_checking": 4500.20,
+        "balance_savings": 22000.00,
+        "expense_multiplier": 1.4,  # gasta más — perfil familia
+        "salary_range": (3200, 3800),
+        "goals": [
+            {"name": "Fondo universitario hijos", "target": 50000.0, "current": 22000.0, "deadline": "2030-09-01"},
+            {"name": "Reforma cocina", "target": 8000.0, "current": 2500.0, "deadline": "2025-12-31"},
+        ],
+    },
+    {
+        "name": "Ana López Torres",
+        "email": "ana.lopez@test.com",
+        "password": "test1234",
+        "balance_checking": 320.50,
+        "balance_savings": 800.00,
+        "expense_multiplier": 0.5,  # gasta poco — perfil estudiante
+        "salary_range": (900, 1100),
+        "goals": [
+            {"name": "Viaje a Japón", "target": 3000.0, "current": 800.0, "deadline": "2025-08-01"},
+        ],
+    },
+]
+
+
+def seed_test_users():
+    """Añade usuarios de prueba adicionales a la BD existente."""
+    db = SessionLocal()
+    now = datetime.now()
+    created = 0
+
+    for profile in TEST_USERS:
+        existing = db.query(User).filter(User.email == profile["email"]).first()
+        if existing:
+            print(f"  Usuario {profile['email']} ya existe. Saltando.")
+            continue
+
+        user = User(
+            name=profile["name"],
+            email=profile["email"],
+            password_hash=hash_password(profile["password"]),
+            created_at=now,
+        )
+        db.add(user)
+        db.flush()
+
+        checking = Account(
+            user_id=user.id,
+            name="Cuenta Corriente",
+            account_type="corriente",
+            balance=profile["balance_checking"],
+            currency="EUR",
+        )
+        savings = Account(
+            user_id=user.id,
+            name="Cuenta Ahorro",
+            account_type="ahorro",
+            balance=profile["balance_savings"],
+            currency="EUR",
+        )
+        db.add_all([checking, savings])
+        db.flush()
+
+        # Ajustar salario y gastos según el perfil
+        mult = profile["expense_multiplier"]
+        sal_min, sal_max = profile["salary_range"]
+        original_categories = EXPENSE_CATEGORIES.copy()
+        adjusted_categories = {
+            cat: (round(mn * mult), round(mx * mult))
+            for cat, (mn, mx) in original_categories.items()
+        }
+
+        transactions = []
+        for months_back in range(11, -1, -1):
+            target = now - timedelta(days=months_back * 30)
+            year, month = target.year, target.month
+
+            salary = round(random.uniform(sal_min, sal_max), 2)
+            transactions.append(Transaction(
+                account_id=checking.id,
+                user_id=user.id,
+                amount=salary,
+                transaction_type="ingreso",
+                category="salario",
+                merchant="Empresa S.A.",
+                description="Nómina mensual",
+                source="salary",
+                date=datetime(year, month, 1, 9, 0),
+            ))
+
+            for category, (min_amt, max_amt) in adjusted_categories.items():
+                freq = EXPENSE_FREQUENCY[category]
+                options = EXPENSE_MERCHANTS[category]
+                for _ in range(freq):
+                    merchant, description = random.choice(options)
+                    transactions.append(Transaction(
+                        account_id=checking.id,
+                        user_id=user.id,
+                        amount=round(random.uniform(max(1, min_amt), max(2, max_amt)), 2),
+                        transaction_type="gasto",
+                        category=category,
+                        merchant=merchant,
+                        description=description,
+                        source="manual",
+                        date=random_day_in_month(year, month),
+                    ))
+
+        db.add_all(transactions)
+
+        goals = []
+        for g in profile["goals"]:
+            deadline = datetime.strptime(g["deadline"], "%Y-%m-%d") if g.get("deadline") else None
+            goals.append(Goal(
+                user_id=user.id,
+                name=g["name"],
+                target_amount=g["target"],
+                current_amount=g["current"],
+                deadline=deadline,
+                status="active",
+                created_at=now,
+            ))
+        db.add_all(goals)
+        db.commit()
+
+        print(
+            f"  Creado: {profile['name']} ({profile['email']}) — "
+            f"{len(transactions)} transacciones, {len(goals)} metas"
+        )
+        created += 1
+
+    db.close()
+    if created == 0:
+        print("Todos los usuarios de prueba ya existían.")
+    else:
+        print(f"\nTotal: {created} usuario(s) de prueba añadido(s).")
+
+
 if __name__ == "__main__":
     seed()
     seed_investments()
+    print("\nSeedando usuarios de prueba...")
+    seed_test_users()

@@ -1,23 +1,44 @@
-const API_URL = ''
+function getToken() {
+  return localStorage.getItem('token')
+}
 
-export async function sendChatMessage(message, history = [], userId = 1) {
-  const res = await fetch(`${API_URL}/chat/`, {
+export function apiFetch(url, options = {}) {
+  const token = getToken()
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  })
+}
+
+export function apiStream(url, body) {
+  return apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, user_id: userId, history }),
+    body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error('Error en la respuesta del servidor')
+}
+
+export async function apiPost(url, body) {
+  const res = await apiFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Error ${res.status}`)
+  }
   return res.json()
 }
 
-export async function getSummary(userId = 1) {
-  const res = await fetch(`${API_URL}/transactions/summary?user_id=${userId}`)
-  if (!res.ok) throw new Error('Error obteniendo resumen')
-  return res.json()
-}
-
-export async function getAccounts(userId = 1) {
-  const res = await fetch(`${API_URL}/transactions/accounts?user_id=${userId}`)
-  if (!res.ok) throw new Error('Error obteniendo cuentas')
+export async function apiGet(url) {
+  const res = await apiFetch(url)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Error ${res.status}`)
+  }
   return res.json()
 }
