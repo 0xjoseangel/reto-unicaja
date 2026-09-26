@@ -58,7 +58,6 @@ function TypewriterText({ text, active }) {
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
 import InvestmentConfirmModal from './InvestmentConfirmModal'
-import VoiceModal from './VoiceModal'
 
 const SUGGESTIONS = [
   '¿Cuál es mi saldo actual?',
@@ -67,7 +66,7 @@ const SUGGESTIONS = [
   'Evolución mensual de gastos',
 ]
 
-export default function ChatBox() {
+export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onHistoryChange, initialPrompt, onInitialPromptConsumed }) {
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
@@ -80,12 +79,30 @@ export default function ChatBox() {
   const [streamingMsgIdx, setStreamingMsgIdx] = useState(-1)
   const [pendingBizum, setPendingBizum] = useState(null)
   const [pendingInvestment, setPendingInvestment] = useState(null)
-  const [voiceOpen, setVoiceOpen] = useState(false)
   const bottomRef = useRef(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
+
+  // El widget de voz vive en App.jsx (persistente entre pestañas). Le exponemos
+  // el handler que actualiza los mensajes de este chat cuando termina una vuelta de voz.
+  useEffect(() => {
+    registerVoiceCompleteHandler?.(handleVoiceComplete)
+    return () => registerVoiceCompleteHandler?.(null)
+  }, [registerVoiceCompleteHandler, history])
+
+  useEffect(() => {
+    onHistoryChange?.(history)
+  }, [history, onHistoryChange])
+
+  useEffect(() => {
+    if (initialPrompt) {
+      handleSend(initialPrompt)
+      onInitialPromptConsumed?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPrompt])
 
   async function handleSend(text) {
     const message = text || input.trim()
@@ -239,13 +256,6 @@ export default function ChatBox() {
           onCancel={handleBizumCancel}
         />
       )}
-      {voiceOpen && (
-        <VoiceModal
-          history={history}
-          onClose={() => setVoiceOpen(false)}
-          onComplete={handleVoiceComplete}
-        />
-      )}
       {pendingInvestment && (
         <InvestmentConfirmModal
           ticker={pendingInvestment.ticker}
@@ -351,7 +361,7 @@ export default function ChatBox() {
           disabled={loading}
         />
         <button
-          onClick={() => setVoiceOpen(true)}
+          onClick={() => onOpenVoice?.()}
           disabled={loading}
           title="Hablar con el asistente"
           className="flex-none w-9 h-9 rounded-[6px] border border-[#EAEAEA]

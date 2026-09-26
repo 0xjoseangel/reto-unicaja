@@ -22,6 +22,7 @@ from app.agent.financial_mcp import (
     calculate_loan,
     calculate_mortgage,
     calculate_savings_goal,
+    create_goal,
     get_account_balances,
     get_asset_details,
     get_bizum_history,
@@ -37,8 +38,10 @@ from app.agent.financial_mcp import (
     get_recent_transactions,
     get_spending_analysis,
     get_transaction_count,
+    list_goals,
     make_bizum_transfer,
     search_specific_transactions,
+    update_goal_progress,
 )
 from app.core.config import settings
 from app.schemas.financial import (
@@ -81,11 +84,15 @@ HERRAMIENTAS DISPONIBLES:
 - get_asset_details            → datos de un activo (precio, PER, dividendo, sector)
 - get_market_overview          → índices globales (S&P500, IBEX, Nasdaq, Oro)
 - add_investment               → registra una compra en cartera (solo tras confirmación explícita)
+- create_goal                   → crea un objetivo de ahorro nuevo (no mueve dinero, no requiere confirmación)
+- list_goals                    → lista los objetivos de ahorro del usuario
+- update_goal_progress          → actualiza el importe ahorrado de un objetivo existente
 
 REGLAS CRÍTICAS:
 - Nunca hagas cálculos matemáticos tú mismo. Usa siempre la herramienta correspondiente.
 - Para cualquier acción de Bizum: devuelve pending_action bizum_confirm, NO llames a make_bizum_transfer hasta recibir confirmación explícita.
 - Para registrar una inversión: devuelve pending_action investment_confirm, NO llames a add_investment hasta recibir confirmación explícita. Solo una inversión por pending_action.
+- Para crear/actualizar objetivos: llama directamente a create_goal / update_goal_progress, sin pending_action — no es una operación irreversible ni mueve dinero real. Si el usuario no da un importe objetivo o nombre claro, pregúntaselo antes de llamar a la tool.
 - Si el resultado de make_bizum_transfer incluye "nuevo_saldo_total", usa ese valor como saldo actualizado.
 - Para gráficos: cartera → pie (valor actual por activo); categorías → pie o bar; evolución temporal → line.
 
@@ -454,6 +461,57 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_goal",
+            "description": (
+                "Crea un objetivo de ahorro nuevo para el usuario. No mueve dinero ni es "
+                "irreversible, así que no requiere confirmación previa del usuario."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "integer"},
+                    "name": {"type": "string", "description": "Nombre descriptivo del objetivo."},
+                    "target_amount": {"type": "number", "description": "Importe objetivo en euros."},
+                    "current_amount": {"type": "number", "description": "Importe ya ahorrado (por defecto 0)."},
+                    "deadline": {"type": "string", "description": "Fecha límite en formato YYYY-MM-DD, opcional."},
+                },
+                "required": ["user_id", "name", "target_amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_goals",
+            "description": "Lista los objetivos de ahorro del usuario.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "integer"},
+                    "status": {"type": "string", "enum": ["active", "completed", "cancelled", "all"]},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_goal_progress",
+            "description": "Actualiza el importe ahorrado de un objetivo existente.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal_id": {"type": "integer", "description": "ID del objetivo (obtenido con list_goals)."},
+                    "new_current_amount": {"type": "number", "description": "Nuevo importe total ahorrado."},
+                    "user_id": {"type": "integer"},
+                },
+                "required": ["goal_id", "new_current_amount"],
+            },
+        },
+    },
 ]
 
 TOOL_MAP = {
@@ -480,6 +538,9 @@ TOOL_MAP = {
     "get_asset_details": get_asset_details,
     "get_market_overview": get_market_overview,
     "add_investment": add_investment,
+    "create_goal": create_goal,
+    "list_goals": list_goals,
+    "update_goal_progress": update_goal_progress,
 }
 
 

@@ -115,6 +115,13 @@ class Alert(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Tarjeta generativa del dashboard proactivo
+    card_type: Mapped[str] = mapped_column(String(30), default="text")  # text | chart | stat
+    chart_type: Mapped[str | None] = mapped_column(String(10), nullable=True)   # bar | line | pie
+    chart_data: Mapped[str | None] = mapped_column(Text, nullable=True)         # JSON de ChartDataPoint[]
+    chart_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cta_prompt: Mapped[str | None] = mapped_column(String(300), nullable=True)  # pregunta sugerida al hacer click
+
     user: Mapped["User"] = relationship("User", back_populates="alerts")
 
 

@@ -314,41 +314,71 @@ def _seed_user_transactions(db, user, checking, savings, months: int = 12):
 
 TEST_USERS = [
     {
-        "name": "María García López",
-        "email": "maria.garcia@test.com",
+        # Perfil "alto patrimonio": mucho colchón, ingresos altos y estables, cartera de
+        # inversión relevante, gasto elevado pero controlado — el dashboard debería
+        # priorizar progreso de metas y alertas de oportunidad de inversión, no avisos de gasto.
+        "name": "Alejandro Fernández Ruiz",
+        "email": "alejandro.fernandez@test.com",
         "password": "test1234",
-        "balance_checking": 1240.80,
-        "balance_savings": 3200.00,
-        "expense_multiplier": 0.75,  # gasta menos — perfil ahorradora
-        "salary_range": (1600, 1800),
+        "balance_checking": 15420.90,
+        "balance_savings": 92000.00,
+        "expense_multiplier": 2.1,
+        "salary_range": (6500, 7200),
+        "salary_category": "salario",
+        "salary_merchant": "Consultora Fernández & Asociados",
+        "salary_description": "Nómina mensual (socio)",
+        "category_multipliers": {"restaurantes": 3.0, "ropa": 2.5, "ocio": 2.0},
         "goals": [
-            {"name": "Coche nuevo", "target": 15000.0, "current": 3200.0, "deadline": "2026-06-30"},
+            {"name": "Segunda vivienda en la costa", "target": 220000.0, "current": 92000.0, "deadline": "2028-06-30"},
+            {"name": "Jubilación anticipada", "target": 500000.0, "current": 145000.0, "deadline": "2040-01-01"},
+        ],
+        "investments": [
+            {"ticker": "AAPL", "name": "Apple Inc.", "investment_type": "accion", "shares": 80, "avg_purchase_price": 140.00, "currency": "USD", "purchase_date": "2021-04-10"},
+            {"ticker": "MSFT", "name": "Microsoft Corp.", "investment_type": "accion", "shares": 45, "avg_purchase_price": 260.00, "currency": "USD", "purchase_date": "2021-09-15"},
+            {"ticker": "VOO", "name": "Vanguard S&P 500 ETF", "investment_type": "etf", "shares": 120, "avg_purchase_price": 350.00, "currency": "USD", "purchase_date": "2020-11-02"},
+            {"ticker": "IWDA.AS", "name": "iShares Core MSCI World ETF", "investment_type": "fondo_indexado", "shares": 400, "avg_purchase_price": 70.00, "currency": "EUR", "purchase_date": "2019-05-20"},
+            {"ticker": "SAN.MC", "name": "Banco Santander S.A.", "investment_type": "accion", "shares": 3000, "avg_purchase_price": 3.10, "currency": "EUR", "purchase_date": "2020-02-10"},
         ],
     },
     {
-        "name": "Carlos Ruiz Martínez",
-        "email": "carlos.ruiz@test.com",
+        # Perfil "estudiante sin un duro": ingreso muy bajo e irregular (beca + trabajo
+        # parcial), casi sin ahorro, gasto mínimo — el dashboard debería priorizar avisos
+        # de presupuesto ajustado, no oportunidades de inversión.
+        "name": "Lucía Moreno Díaz",
+        "email": "lucia.moreno@test.com",
         "password": "test1234",
-        "balance_checking": 4500.20,
-        "balance_savings": 22000.00,
-        "expense_multiplier": 1.4,  # gasta más — perfil familia
-        "salary_range": (3200, 3800),
+        "balance_checking": 42.15,
+        "balance_savings": 0.00,
+        "expense_multiplier": 0.35,
+        "salary_range": (350, 480),
+        "salary_category": "beca",
+        "salary_merchant": "Universidad de Granada",
+        "salary_description": "Beca + trabajo parcial",
+        "category_multipliers": {"alquiler": 0.55, "restaurantes": 0.3, "ropa": 0.2, "salud": 0.2},
         "goals": [
-            {"name": "Fondo universitario hijos", "target": 50000.0, "current": 22000.0, "deadline": "2030-09-01"},
-            {"name": "Reforma cocina", "target": 8000.0, "current": 2500.0, "deadline": "2025-12-31"},
+            {"name": "Portátil nuevo para clase", "target": 900.0, "current": 45.0, "deadline": "2026-02-01"},
         ],
+        "investments": [],
     },
     {
-        "name": "Ana López Torres",
-        "email": "ana.lopez@test.com",
+        # Perfil "pensionista": ingreso fijo bajo pero muy estable (pensión), ahorro
+        # acumulado de toda la vida laboral, gasto conservador salvo en salud — el
+        # dashboard debería mostrar estabilidad, no anomalías, y priorizar salud/ocio.
+        "name": "Manuel Torres Jiménez",
+        "email": "manuel.torres@test.com",
         "password": "test1234",
-        "balance_checking": 320.50,
-        "balance_savings": 800.00,
-        "expense_multiplier": 0.5,  # gasta poco — perfil estudiante
-        "salary_range": (900, 1100),
+        "balance_checking": 2180.60,
+        "balance_savings": 48500.00,
+        "expense_multiplier": 0.6,
+        "salary_range": (1250, 1250),
+        "salary_category": "pension",
+        "salary_merchant": "Seguridad Social",
+        "salary_description": "Pensión de jubilación",
+        "category_multipliers": {"salud": 2.8, "ocio": 0.7, "ropa": 0.4, "transporte": 0.5},
         "goals": [
-            {"name": "Viaje a Japón", "target": 3000.0, "current": 800.0, "deadline": "2025-08-01"},
+            {"name": "Crucero por el Mediterráneo", "target": 6000.0, "current": 3400.0, "deadline": "2026-05-01"},
         ],
+        "investments": [],
     },
 ]
 
@@ -391,13 +421,16 @@ def seed_test_users():
         db.add_all([checking, savings])
         db.flush()
 
-        # Ajustar salario y gastos según el perfil
+        # Ajustar salario y gastos según el perfil — cada categoría puede tener su propio
+        # multiplicador (category_multipliers) además del multiplicador general, para que
+        # perfiles como el pensionista (mucho gasto en salud) o el estudiante (casi nada en
+        # ropa/ocio) no se queden en una simple escala uniforme.
         mult = profile["expense_multiplier"]
+        overrides = profile.get("category_multipliers", {})
         sal_min, sal_max = profile["salary_range"]
-        original_categories = EXPENSE_CATEGORIES.copy()
         adjusted_categories = {
-            cat: (round(mn * mult), round(mx * mult))
-            for cat, (mn, mx) in original_categories.items()
+            cat: (round(mn * overrides.get(cat, mult)), round(mx * overrides.get(cat, mult)))
+            for cat, (mn, mx) in EXPENSE_CATEGORIES.items()
         }
 
         transactions = []
@@ -411,9 +444,9 @@ def seed_test_users():
                 user_id=user.id,
                 amount=salary,
                 transaction_type="ingreso",
-                category="salario",
-                merchant="Empresa S.A.",
-                description="Nómina mensual",
+                category=profile.get("salary_category", "salario"),
+                merchant=profile.get("salary_merchant", "Empresa S.A."),
+                description=profile.get("salary_description", "Nómina mensual"),
                 source="salary",
                 date=datetime(year, month, 1, 9, 0),
             ))
@@ -450,11 +483,27 @@ def seed_test_users():
                 created_at=now,
             ))
         db.add_all(goals)
+
+        investments = [
+            Investment(
+                user_id=user.id,
+                ticker=inv["ticker"],
+                name=inv["name"],
+                investment_type=inv["investment_type"],
+                shares=inv["shares"],
+                avg_purchase_price=inv["avg_purchase_price"],
+                currency=inv["currency"],
+                purchase_date=datetime.strptime(inv["purchase_date"], "%Y-%m-%d"),
+            )
+            for inv in profile.get("investments", [])
+        ]
+        db.add_all(investments)
+
         db.commit()
 
         print(
             f"  Creado: {profile['name']} ({profile['email']}) — "
-            f"{len(transactions)} transacciones, {len(goals)} metas"
+            f"{len(transactions)} transacciones, {len(goals)} metas, {len(investments)} inversiones"
         )
         created += 1
 

@@ -14,6 +14,7 @@ export default defineConfig({
       '/chat': backendUrl,
       '/transactions': backendUrl,
       '/voice': backendUrl,
+      '/dashboard': backendUrl,
     },
   },
 })

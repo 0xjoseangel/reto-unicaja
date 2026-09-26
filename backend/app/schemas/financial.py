@@ -72,3 +72,35 @@ class ChatResponse(BaseModel):
     chart_data: list[ChartDataPoint] | None = None
     chart_title: str | None = None
     pending_action: PendingBizumAction | PendingInvestmentAction | None = None
+
+
+# ── Dashboard proactivo ─────────────────────────────────────────────────────
+
+class AlertCardIn(BaseModel):
+    """Lo que genera el LLM para una tarjeta del dashboard. Se valida antes de guardar
+    en la tabla `alerts` — una tarjeta inválida se descarta sin tumbar el resto del batch."""
+    type: Literal["budget_warning", "anomaly", "positive", "goal_progress", "weekly_summary"]
+    title: str
+    body: str
+    severity: Literal["info", "warning", "critical"] = "info"
+    card_type: Literal["text", "chart", "stat"] = "text"
+    chart_type: Literal["bar", "line", "pie"] | None = None
+    chart_data: list[ChartDataPoint] | None = None
+    chart_title: str | None = None
+    cta_prompt: str | None = None
+
+
+class AlertCardOut(BaseModel):
+    """Lo que sirve GET /dashboard/ — igual que AlertCardIn más los campos de persistencia."""
+    id: int
+    type: Literal["budget_warning", "anomaly", "positive", "goal_progress", "weekly_summary"]
+    title: str
+    body: str
+    severity: Literal["info", "warning", "critical"]
+    card_type: Literal["text", "chart", "stat"]
+    chart_type: Literal["bar", "line", "pie"] | None = None
+    chart_data: list[ChartDataPoint] | None = None
+    chart_title: str | None = None
+    cta_prompt: str | None = None
+    seen: bool
+    generated_at: datetime

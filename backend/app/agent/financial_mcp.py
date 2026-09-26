@@ -8,7 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from sqlalchemy import extract, func, or_
 
 from app.core.database import SessionLocal
-from app.models.financial import Account, BizumTransfer, Investment, Transaction
+from app.models.financial import Account, BizumTransfer, Goal, Investment, Transaction
 
 mcp = FastMCP("financial-assistant")
 
@@ -922,6 +922,34 @@ def get_market_overview() -> dict:
 
 
 @mcp.tool()
+def get_portfolio_news(user_id: int = 1, max_per_ticker: int = 3) -> dict:
+    """Obtiene noticias recientes de los activos que el usuario tiene en cartera, vía
+    yfinance. Uso exclusivo del job de generación del dashboard proactivo (no se expone
+    al chat conversacional para no gastar tokens/tiempo en cada mensaje)."""
+    portfolio = get_portfolio(user_id=user_id)
+    tickers = [a["ticker"] for a in portfolio.get("activos", [])]
+
+    noticias = []
+    for ticker in tickers:
+        try:
+            items = yf.Ticker(ticker).news or []
+        except Exception:
+            items = []
+
+        for item in items[:max_per_ticker]:
+            content = item.get("content", item)  # formatos antiguos de yfinance no anidan en "content"
+            pub_date = content.get("pubDate") or content.get("providerPublishTime")
+            noticias.append({
+                "ticker": ticker,
+                "titulo": content.get("title", ""),
+                "fuente": (content.get("provider") or {}).get("displayName", "N/D"),
+                "fecha": pub_date,
+            })
+
+    return {"noticias": noticias}
+
+
+@mcp.tool()
 def add_investment(
     user_id: int,
     ticker: str,
@@ -1001,6 +1029,144 @@ def add_investment(
                 "moneda": currency,
                 "operacion": "añadido",
             }
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def create_goal(
+    user_id: int,
+    name: str,
+    target_amount: float,
+    current_amount: float = 0.0,
+    deadline: str | None = None,
+) -> dict:
+    """Crea un objetivo de ahorro nuevo para el usuario (ej: "entrada para vivienda",
+    "viaje a Japón", "fondo de emergencia"). No requiere confirmación previa del usuario:
+    a diferencia de un Bizum o una inversión, crear un objetivo no mueve dinero ni es
+    irreversible — el usuario puede pedir que se borre o se corrija después.
+
+    Args:
+        user_id: ID del usuario.
+        name: Nombre descriptivo del objetivo.
+        target_amount: Importe objetivo en euros (> 0).
+        current_amount: Importe ya ahorrado hacia el objetivo (>= 0, por defecto 0).
+        deadline: Fecha límite en formato YYYY-MM-DD, o None si no tiene.
+    """
+    if target_amount <= 0:
+        return {"success": False, "error": "El importe objetivo debe ser mayor que 0€."}
+    if current_amount < 0:
+        return {"success": False, "error": "El importe ya ahorrado no puede ser negativo."}
+    if current_amount > target_amount:
+        return {"success": False, "error": "El importe ya ahorrado no puede superar el objetivo."}
+
+    deadline_dt = None
+    if deadline:
+        try:
+            deadline_dt = datetime.strptime(deadline, "%Y-%m-%d")
+        except ValueError:
+            return {"success": False, "error": "La fecha límite debe tener formato YYYY-MM-DD."}
+
+    db = SessionLocal()
+    try:
+        goal = Goal(
+            user_id=user_id,
+            name=name,
+            target_amount=round(target_amount, 2),
+            current_amount=round(current_amount, 2),
+            deadline=deadline_dt,
+            status="active",
+            created_at=datetime.now(),
+        )
+        db.add(goal)
+        db.commit()
+        db.refresh(goal)
+
+        return {
+            "success": True,
+            "id": goal.id,
+            "nombre": goal.name,
+            "objetivo": goal.target_amount,
+            "ahorrado": goal.current_amount,
+            "fecha_limite": goal.deadline.strftime("%Y-%m-%d") if goal.deadline else None,
+            "progreso_pct": round(goal.current_amount / goal.target_amount * 100, 1),
+        }
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def list_goals(user_id: int = 1, status: str = "active") -> dict:
+    """Lista los objetivos de ahorro del usuario.
+
+    Args:
+        user_id: ID del usuario.
+        status: Filtra por estado: active, completed, cancelled, o "all" para todos.
+    """
+    db = SessionLocal()
+    try:
+        query = db.query(Goal).filter(Goal.user_id == user_id)
+        if status != "all":
+            query = query.filter(Goal.status == status)
+        goals = query.order_by(Goal.created_at.desc()).all()
+
+        return {
+            "objetivos": [
+                {
+                    "id": g.id,
+                    "nombre": g.name,
+                    "objetivo": g.target_amount,
+                    "ahorrado": g.current_amount,
+                    "progreso_pct": round(g.current_amount / g.target_amount * 100, 1) if g.target_amount else 0,
+                    "fecha_limite": g.deadline.strftime("%Y-%m-%d") if g.deadline else None,
+                    "estado": g.status,
+                }
+                for g in goals
+            ]
+        }
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def update_goal_progress(goal_id: int, new_current_amount: float, user_id: int = 1) -> dict:
+    """Actualiza el importe ahorrado de un objetivo existente. Si el nuevo importe alcanza
+    o supera el objetivo, lo marca automáticamente como "completed".
+
+    Args:
+        goal_id: ID del objetivo (obtenido con list_goals).
+        new_current_amount: Nuevo importe total ahorrado hacia el objetivo (>= 0).
+        user_id: ID del usuario, para verificar que el objetivo le pertenece.
+    """
+    if new_current_amount < 0:
+        return {"success": False, "error": "El importe ahorrado no puede ser negativo."}
+
+    db = SessionLocal()
+    try:
+        goal = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == user_id).first()
+        if not goal:
+            return {"success": False, "error": f"No se encontró el objetivo {goal_id} para este usuario."}
+
+        goal.current_amount = round(new_current_amount, 2)
+        if goal.current_amount >= goal.target_amount:
+            goal.status = "completed"
+        db.commit()
+
+        return {
+            "success": True,
+            "id": goal.id,
+            "nombre": goal.name,
+            "ahorrado": goal.current_amount,
+            "objetivo": goal.target_amount,
+            "estado": goal.status,
+            "progreso_pct": round(goal.current_amount / goal.target_amount * 100, 1),
+        }
     except Exception as e:
         db.rollback()
         return {"success": False, "error": str(e)}

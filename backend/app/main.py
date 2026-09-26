@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import auth, chat, transactions, voice
+from app.api.routes import auth, chat, dashboard, transactions, voice
 from app.core.config import settings
 from app.core.database import Base, engine
+from app.core.scheduler import start_scheduler, stop_scheduler
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
@@ -19,6 +20,17 @@ app.include_router(auth.router)
 app.include_router(transactions.router)
 app.include_router(chat.router)
 app.include_router(voice.router)
+app.include_router(dashboard.router)
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    stop_scheduler()
 
 
 @app.get("/")
