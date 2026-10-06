@@ -1,6 +1,6 @@
 # Sistema de Interacción por Voz
 
-Documentación del subsistema de voz de "Habla con tu dinero": cómo funciona el reconocimiento de voz (STT), la síntesis de voz (TTS), los endpoints del backend, la UI del frontend y cómo se integra todo con el agente financiero existente.
+Documentación del subsistema de voz de "Habla con tu dinero": cómo funciona la detección de voz (VAD), el reconocimiento de voz (STT), la síntesis de voz (TTS), los endpoints del backend, la UI del frontend y cómo se integra todo con el agente financiero existente.
 
 ---
 
@@ -12,7 +12,7 @@ Documentación del subsistema de voz de "Habla con tu dinero": cómo funciona el
 4. [Text-to-Speech: Piper TTS](#4-text-to-speech-piper-tts)
 5. [Endpoints del backend](#5-endpoints-del-backend)
 6. [Infraestructura Docker](#6-infraestructura-docker)
-7. [Frontend: VoiceModal](#7-frontend-voicemodaln)
+7. [Frontend: VoiceModal en modo conversación](#7-frontend-voicemodal-en-modo-conversación)
 8. [Integración con el agente](#8-integración-con-el-agente)
 9. [Persistencia de modelos](#9-persistencia-de-modelos)
 10. [Rendimiento y limitaciones](#10-rendimiento-y-limitaciones)
@@ -23,87 +23,75 @@ Documentación del subsistema de voz de "Habla con tu dinero": cómo funciona el
 
 El subsistema de voz permite al usuario hablar directamente con el asistente financiero. Toda la IA corre en local, sin depender de APIs externas de voz:
 
-| Componente | Tecnología | Modelo | Tamaño |
-|-----------|-----------|--------|--------|
-| STT (voz → texto) | faster-whisper | `base` (multilingüe) | ~150 MB |
-| TTS (texto → voz) | Piper TTS | `es_ES-davefx-medium` | ~65 MB |
+| Componente | Dónde corre | Tecnología | Modelo | Tamaño |
+|-----------|-------------|-----------|--------|--------|
+| VAD (¿está hablando?) | Navegador | `@ricky0123/vad-web` + onnxruntime-web | Silero VAD v5 | ~2 MB |
+| STT (voz → texto) | Backend | faster-whisper | `base` (multilingüe) | ~150 MB |
+| TTS (texto → voz) | Backend | Piper TTS | `es_ES-davefx-medium` | ~65 MB |
 
-Los modelos se descargan automáticamente la primera vez que se llama al endpoint y quedan cacheados en un volumen Docker persistente (`ml_models`). Las llamadas siguientes son instantáneas.
+La interacción es una **conversación**, no "pulsa para hablar":
+
+- El VAD detecta solo cuándo empiezas y terminas de hablar.
+- El asistente empieza a contestar en cuanto tiene la primera frase, sin esperar a la respuesta entera.
+- Al terminar de hablar, el micrófono se vuelve a abrir solo.
+
+Whisper y Piper se descargan la primera vez y quedan cacheados en un volumen Docker persistente (`ml_models`). Además se **precargan en memoria al arrancar el backend**, así que la primera frase no espera a que se carguen. El modelo del VAD se sirve desde el propio frontend (`/vad/`), sin CDN: todo el modo voz funciona sin internet, salvo el LLM si es un proveedor en la nube.
 
 ---
 
 ## 2. Arquitectura y flujo completo
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         FRONTEND (React)                            │
-│                                                                     │
-│  [🎤 botón]  →  VoiceModal abre                                     │
-│                     │                                               │
-│              Estado: idle → listening → processing → speaking       │
-│                     │                                               │
-│           MediaRecorder (audio/webm)                                │
-│           Web Audio API (amplitud → escala del orbe)                │
-└─────────────────────┬───────────────────────────────────────────────┘
-                      │ 1. POST /voice/transcribe  (audio blob)
-                      ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        BACKEND (FastAPI)                            │
-│                                                                     │
-│  /voice/transcribe                                                  │
-│    └─ whisper_service.py                                            │
-│         └─ WhisperModel("base") → texto en español                  │
-│                                                                     │
-│  {"text": "¿Cuánto vale mi cartera?"}                               │
-└─────────────────────┬───────────────────────────────────────────────┘
-                      │ 2. {"text": "..."} devuelto al frontend
-                      │
-                      │ 3. Frontend llama a POST /chat/stream
-                      │    (reutiliza el agente existente)
-                      ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    AGENTE FINANCIERO (LiteLLM)                      │
-│                                                                     │
-│  Phase 1: tool loop (get_portfolio, get_market_overview, ...)       │
-│  Phase 2: streaming SSE → tokens de texto                           │
-│                                                                     │
-│  Frontend acumula todos los tokens → texto completo                 │
-└─────────────────────┬───────────────────────────────────────────────┘
-                      │ 4. POST /voice/synthesize  (texto de respuesta)
-                      ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        BACKEND (FastAPI)                            │
-│                                                                     │
-│  /voice/synthesize                                                  │
-│    └─ tts_service.py                                                │
-│         └─ PiperVoice("es_ES-davefx-medium")                       │
-│              └─ generador AudioChunk → WAV 16-bit 22050 Hz          │
-│                                                                     │
-│  Response: audio/wav (binario)                                      │
-└─────────────────────┬───────────────────────────────────────────────┘
-                      │ 5. Blob URL → new Audio().play()
-                      ▼
-                 Usuario escucha la respuesta
-                 Mensajes aparecen también en el chat escrito
+┌──────────────────────────────────────────────────────────────────────┐
+│                     FRONTEND (React, VoiceModal)                     │
+│                                                                      │
+│  Micrófono → MicVAD (Silero VAD en un AudioWorklet)                  │
+│     │  onSpeechStart  → orbe rojo, reacciona al volumen              │
+│     │  onSpeechEnd    → 700 ms de silencio = fin del turno           │
+│     ▼                                                                │
+│  Float32Array 16 kHz → WAV                                           │
+└─────┬────────────────────────────────────────────────────────────────┘
+      │ 1. POST /voice/transcribe  (audio/wav)
+      ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  BACKEND  whisper_service → WhisperModel("base") → texto             │
+└─────┬────────────────────────────────────────────────────────────────┘
+      │ 2. {"text": "¿Cuánto vale mi cartera?"}
+      │ 3. POST /chat/stream  (voice_mode: true)
+      ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  AGENTE (grafo de LangGraph)                                         │
+│  agent: tool loop  →  respond: streaming SSE de tokens               │
+└─────┬────────────────────────────────────────────────────────────────┘
+      │ 4. tokens llegando...
+      ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  FRONTEND  SentenceSplitter: corta en frases según llegan            │
+│            SpeechQueue: cada frase → POST /voice/synthesize          │
+│                         (en paralelo) y se reproduce en orden        │
+└─────┬────────────────────────────────────────────────────────────────┘
+      │ 5. Termina la última frase
+      ▼
+   El micrófono se vuelve a abrir solo → siguiente turno
+   (los mensajes aparecen también en el chat escrito)
 ```
 
-### Timeline de una consulta de voz
+### Timeline de un turno
 
 ```
-t=0ms    Usuario pulsa el orbe → MediaRecorder.start()
-t=...    Web Audio API lee amplitud → orbe escala en tiempo real
-t=3000ms Usuario pulsa para parar → MediaRecorder.stop()
-t=3050ms Blob audio/webm listo → POST /voice/transcribe
-t=5000ms Whisper devuelve {"text": "¿Cuánto vale mi cartera?"}
-t=5010ms POST /chat/stream enviado → agente empieza tool loop
-t=5500ms Agente llama get_portfolio() + get_market_overview()
-t=8000ms Fase 2: streaming de tokens comienza → orbe gira (processing)
-t=9500ms Todos los tokens recibidos → POST /voice/synthesize
-t=10000ms Piper genera ~1.5s de audio WAV
-t=10000ms Audio.play() → orbe pulsa (speaking)
-t=11500ms Audio termina → orbe vuelve a idle
-t=11500ms Mensajes aparecen en el chat
+t=0ms     El usuario empieza a hablar → VAD: onSpeechStart → orbe rojo
+t=2000ms  Deja de hablar
+t=2700ms  700 ms de silencio → VAD: onSpeechEnd → POST /voice/transcribe (WAV)
+t=4500ms  Whisper devuelve {"text": "¿Cuánto vale mi cartera?"}
+t=4510ms  POST /chat/stream → nodo agent (tool loop)
+t=7500ms  Empiezan a llegar tokens (nodo respond)
+t=8200ms  Primera frase completa → POST /voice/synthesize
+t=8800ms  Empieza a sonar la primera frase, mientras siguen llegando tokens
+          y se sintetizan las siguientes
+t=15000ms Termina la última frase → micro abierto ("Te escucho")
 ```
+
+Antes, el audio no empezaba hasta tener la respuesta **entera** sintetizada. Ahora empieza en cuanto está la primera frase, y además el usuario no tiene que pulsar para terminar su turno.
 
 ---
 
@@ -260,7 +248,7 @@ Transcribe un fichero de audio a texto en español.
 
 **Request:** `multipart/form-data`
 ```
-file: <audio blob>   # audio/webm, audio/ogg o audio/wav
+file: <audio blob>   # audio/wav (modo conversación, VAD), audio/webm o audio/ogg
 ```
 
 **Response:** `application/json`
@@ -272,14 +260,21 @@ file: <audio blob>   # audio/webm, audio/ogg o audio/wav
 
 **Errores:**
 - `400 Bad Request` si no se detecta voz en el audio (transcripción vacía)
-- `500 Internal Server Error` si ffmpeg no puede decodificar el formato
+- `500 Internal Server Error` si no se puede decodificar el audio (ver la nota sobre `av` en §6)
 
 **Implementación:** `backend/app/api/routes/voice.py`
 ```python
 @router.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
     data = await file.read()
-    suffix = ".ogg" if "ogg" in (file.content_type or "") else ".webm"
+    content_type = file.content_type or ""
+    # El modo conversación (VAD en el navegador) envía WAV; MediaRecorder, webm/ogg
+    if "wav" in content_type:
+        suffix = ".wav"
+    elif "ogg" in content_type:
+        suffix = ".ogg"
+    else:
+        suffix = ".webm"
     text = await transcribe(data, suffix)
     if not text:
         raise HTTPException(status_code=400, detail="No se detectó audio")
@@ -302,6 +297,7 @@ Convierte texto en audio WAV con la voz española de Piper.
 **Response:** `audio/wav` (binario)
 - Formato: PCM 16-bit, mono, 22050 Hz
 - Tamaño típico: ~100-300 KB (1-3 segundos de audio)
+- En modo conversación se llama **una vez por frase**, no una vez por respuesta
 - Sin compresión: el browser puede reproducirlo directamente con `new Audio(blobURL)`
 
 ---
@@ -331,6 +327,8 @@ RUN mkdir -p /app/data
 EXPOSE 8000
 ```
 
+**Versión de `av` fijada:** `requirements.txt` fija `av>=12,<16`. `faster-whisper` 1.2 llama a `av.open(..., metadata_errors="ignore")`, y `av` 19 ya no acepta ese parámetro: cualquier `/voice/transcribe` devolvía 500. Está probado con `av` 15.1.
+
 **Por qué cada paquete:**
 - **ffmpeg**: el navegador graba audio en `webm` (códec Opus). faster-whisper necesita PCM raw; ffmpeg hace la conversión transparentemente cuando se le pasa el fichero `.webm`.
 - **libsndfile1**: librería de C para I/O de audio, usada por varias dependencias de Python como `soundfile`.
@@ -353,6 +351,14 @@ volumes:
   ml_models:   # ← nuevo volumen Docker nombrado
 ```
 
+**Frontend: dependencias nuevas del VAD.** El contenedor del frontend guarda `node_modules` en un volumen anónimo (`/app/node_modules`), y `docker compose up --build` **reutiliza** ese volumen viejo. Tras un `git pull` que añada paquetes (como `@ricky0123/vad-web`), hay que renovarlo:
+
+```bash
+docker compose up -d --build -V frontend   # -V = --renew-anon-volumes
+```
+
+Si no, Vite falla al importar `@ricky0123/vad-web`.
+
 El volumen `ml_models` es un volumen Docker nombrado (no un bind mount). Docker lo gestiona en `/var/lib/docker/volumes/reto-unicaja_ml_models/`. Los modelos se organizan así dentro del volumen:
 
 ```
@@ -368,156 +374,115 @@ El volumen `ml_models` es un volumen Docker nombrado (no un bind mount). Docker 
 
 ---
 
-## 7. Frontend: VoiceModal
+## 7. Frontend: VoiceModal en modo conversación
 
 ### Ubicación y activación
 
-El botón de micrófono aparece en el footer del chat, a la izquierda del botón Enviar:
+El modal se abre desde el botón flotante del dashboard o desde el botón de micrófono del chat. Los dos llaman a `openVoice()` en `App.jsx`. Al abrirse, carga el VAD y empieza a escuchar directamente, sin pulsar nada más.
 
-```jsx
-// ChatBox.jsx
-<button onClick={() => setVoiceOpen(true)} disabled={loading} title="Hablar con el asistente">
-  <svg ...>{/* icono micrófono */}</svg>
-</button>
-
-{voiceOpen && (
-  <VoiceModal
-    history={history}          // historial de conversación para contexto
-    onClose={() => setVoiceOpen(false)}
-    onComplete={handleVoiceComplete}  // añade mensajes al chat escrito
-  />
-)}
-```
-
-### Máquina de estados del orbe
-
-El `VoiceModal` implementa una máquina de estados de 4 fases, visible en la animación del orbe:
+### Máquina de estados
 
 ```
-         tap orbe              tap orbe
-  idle ──────────→ listening ──────────→ processing ──→ speaking ──→ idle
-   ↑                                                                   │
-   └───────────────────────── audio.onended ──────────────────────────┘
+           (VAD: empieza a hablar)          (VAD: 700 ms de silencio)
+listening ─────────────────────────► hearing ────────────────────────► processing
+    ▲   │                                                                   │
+    │   └─(20 s sin hablar o toque)─► idle ─(toque)─► listening             │
+    │                                                                       ▼
+    └──────────────(termina la última frase)───────────────────────── speaking
+                                                                            │
+                     (el agente propone un Bizum/inversión) ─────────► confirm
 ```
 
-| Estado | Color orbe | Animación | Interacción | Texto |
-|--------|-----------|-----------|-------------|-------|
-| `idle` | Verde `#00A651` | Pulso lento (2.4s) | Click → listening | "Toca para hablar" |
-| `listening` | Rojo `#E53E3E` | Escala JS según amplitud | Click → processing | "Escuchando..." |
-| `processing` | Gris `#444444` | Rotación continua (1.2s) | — | "Procesando..." |
-| `speaking` | Verde `#00A651` | Pulso rápido (0.9s) | — | "Respondiendo..." |
+| Estado | Orbe | Micrófono | Toque en el orbe | Texto |
+|--------|------|-----------|------------------|-------|
+| `loading` | Gris, gira | — | — | "Preparando micrófono..." |
+| `listening` | Verde, reacciona al volumen | Abierto (VAD) | Pausa la conversación | "Te escucho" |
+| `hearing` | Rojo, reacciona al volumen | Abierto (VAD) | Pausa la conversación | "Escuchando..." |
+| `processing` | Gris, gira | En pausa | — | "Pensando..." |
+| `speaking` | Verde, pulso rápido | En pausa (o abierto si "interrumpir hablando") | Corta la respuesta y escucha | "Respondiendo..." |
+| `confirm` | Gris | En pausa | — | "Confirma la operación en pantalla" |
+| `idle` | Verde, pulso lento | En pausa | Reanuda | "Conversación en pausa" |
 
-### Web Audio API: visualización de amplitud
+Bajo el orbe se muestra lo último que ha entendido Whisper («...»), para que se vea qué ha transcrito.
 
-Durante `listening`, el orbe reacciona a la voz del usuario en tiempo real. Esto se consigue con la Web Audio API:
+### Detección de voz (VAD): `@ricky0123/vad-web`
+
+`MicVAD` ejecuta el modelo **Silero VAD v5** en el navegador (onnxruntime-web, wasm) sobre el audio del micrófono, en tramas de 32 ms. Cada trama recibe una probabilidad de voz, y la librería emite eventos:
 
 ```javascript
-// 1. Obtener acceso al micrófono
-const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-
-// 2. Crear el grafo de audio: fuente → analizador
-const ctx = new AudioContext()
-const source = ctx.createMediaStreamSource(stream)
-const analyser = ctx.createAnalyser()
-analyser.fftSize = 256  // 128 bins de frecuencia
-source.connect(analyser)
-
-// 3. Bucle de animación: leer amplitud cada frame
-const data = new Uint8Array(analyser.frequencyBinCount)  // 128 valores 0-255
-function tick() {
-  analyser.getByteFrequencyData(data)              // energía por frecuencia
-  const avg = data.reduce((s, v) => s + v, 0) / data.length  // promedio
-  const scale = 1 + (avg / 255) * 0.45            // rango: 1.0 → 1.45
-  setOrbScale(scale)                               // React re-renderiza el orbe
-  animFrameRef.current = requestAnimationFrame(tick)
-}
-tick()
-```
-
-`fftSize=256` da 128 bins de frecuencia. El promedio de energía da un número entre 0 y 255; mapeamos ese rango a un factor de escala entre 1.0 (silencio) y 1.45 (voz alta). El resultado es que el orbe "crece" cuando el usuario habla.
-
-### MediaRecorder: grabación de audio
-
-```javascript
-const mr = new MediaRecorder(stream)
-audioChunksRef.current = []
-mr.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data) }
-mr.start()
-
-// Al parar:
-const blob = await new Promise(resolve => {
-  mr.onstop = () => resolve(new Blob(audioChunksRef.current, { type: 'audio/webm' }))
-  mr.stop()
+const vad = await MicVAD.new({
+  model: 'v5',
+  baseAssetPath: '/vad/',       // modelo .onnx y worklet, servidos por Vite
+  onnxWASMBasePath: '/vad/',    // runtime wasm de onnxruntime
+  startOnLoad: false,
+  positiveSpeechThreshold: 0.5,
+  negativeSpeechThreshold: 0.35,
+  redemptionMs: 700,      // silencio que marca el final del turno
+  minSpeechMs: 300,       // más corto que esto es ruido (tos, golpe) → onVADMisfire
+  preSpeechPadMs: 300,    // audio previo incluido para no cortar la primera sílaba
+  onSpeechStart: ...,     // listening → hearing
+  onSpeechEnd: audio => ...,  // Float32Array 16 kHz con la frase completa
+  onVADMisfire: ...,      // falsa alarma → vuelve a listening
+  onFrameProcessed: (probs, frame) => ...,  // RMS de la trama → escala del orbe
 })
 ```
 
-`MediaRecorder` produce fragmentos de audio en el formato nativo del navegador:
-- **Chrome/Edge**: `audio/webm` con códec Opus
-- **Firefox**: `audio/ogg` con códec Opus
+- **`redemptionMs: 700`** es el ajuste principal. Con menos, corta al usuario cuando hace una pausa para pensar; con más, la respuesta se nota lenta.
+- El micrófono se pide con `echoCancellation`, `noiseSuppression` y `autoGainControl`, que son los valores por defecto de la librería.
+- `vad.pause()` cierra el micrófono (se apaga el indicador del navegador) y `vad.start()` lo vuelve a abrir. El primer `start()` es el que pide permiso; si se deniega, se muestra el error y el modal queda en `idle`.
+- **StrictMode:** en desarrollo, React monta, desmonta y vuelve a montar el componente. Por eso el efecto reinicia `closedRef`, y `destroy()` ignora el error de un VAD que no llegó a arrancar.
 
-El backend detecta el content type y añade la extensión correcta al fichero temporal para que ffmpeg lo decodifique bien.
+**Assets servidos en local** (`vite.config.js`, con `vite-plugin-static-copy`): `silero_vad_v5.onnx`, `vad.worklet.bundle.min.js` y `ort-wasm-simd-threaded*.{wasm,mjs}` se publican en `/vad/`. Así no hay dependencia de un CDN durante la demo.
 
-### Flujo interno del componente
+> **No excluir `onnxruntime-web` de `optimizeDeps`.** `vad-web` es CommonJS y hace `require("onnxruntime-web/wasm")`. Si Vite no pre-empaqueta esa dependencia, el navegador falla con *"Dynamic require of onnxruntime-web/wasm is not supported"*.
+
+### Un turno: `runTurn()` y `speakResponse()`
 
 ```javascript
-async function processAudio(audioBlob) {
-  // 1. Transcribir
-  const form = new FormData()
-  form.append('file', audioBlob, 'audio.webm')
-  const { text: userText } = await fetch('/voice/transcribe', { method: 'POST', body: form }).then(r => r.json())
-
-  // 2. Enviar al agente (stream SSE)
-  const chatRes = await fetch('/chat/stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: userText, user_id: 1, history })
-  })
-
-  // 3. Acumular todos los tokens
-  let assistantText = ''
-  const reader = chatRes.body.getReader()
-  // ... bucle SSE, acumula tokens de tipo 'token' ...
-
-  // 4. Notificar al padre (añade mensajes al chat escrito)
-  onComplete({ userText, assistantText })
-
-  // 5. Sintetizar y reproducir
-  setPhase('speaking')
-  const audioBytes = await fetch('/voice/synthesize', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: assistantText })
-  }).then(r => r.arrayBuffer())
-
-  const audioUrl = URL.createObjectURL(new Blob([audioBytes], { type: 'audio/wav' }))
-  const audio = new Audio(audioUrl)
-  audio.onended = () => { URL.revokeObjectURL(audioUrl); setPhase('idle') }
-  audio.play()
-}
+// onSpeechEnd(audio) → pausa el micro → runTurn(audio)
+const userText = await transcribeSpeech(audio)      // encodeWAV + POST /voice/transcribe
+const res = await apiStream('/chat/stream', { message: userText, history, voice_mode: true },
+                            { signal: controller.signal })
+await speakResponse(res, userText, turn)
 ```
 
-**Por qué `URL.createObjectURL` y no un `<audio src>`**: el audio WAV viene como `ArrayBuffer` de la respuesta fetch. `createObjectURL` genera una URL temporal `blob://...` que el browser puede reproducir directamente. Se revoca con `revokeObjectURL` cuando termina la reproducción para liberar memoria.
+`speakResponse()` lee el SSE y va hablando según llega el texto:
+
+```javascript
+const splitter = new SentenceSplitter()
+const queue = new SpeechQueue({ onStart: () => setPhase('speaking') })
+
+await readSSE(res, ev => {
+  if (ev.type === 'token') splitter.push(ev.text).forEach(s => queue.push(s))
+  ...
+})
+queue.push(splitter.flush())   // el resto que no acabó en punto
+queue.close()
+await queue.done               // termina de sonar la última frase
+resumeListening()              // micro abierto otra vez
+```
+
+Las dos clases están en `frontend/src/services/voice.js`:
+
+- **`SentenceSplitter`** corta en finales de frase (`. ! ? … : ;` seguidos de espacio, o salto de línea). Junta los trozos de menos de 40 caracteres con el siguiente, porque cada petición a Piper tiene un coste fijo y los cortes muy seguidos suenan entrecortados. No corta en `1.250` porque tras ese punto no hay espacio.
+- **`SpeechQueue`** lanza `POST /voice/synthesize` de cada frase **en cuanto llega**, mientras suena la anterior, y las reproduce en orden. `stop()` corta en seco: para el audio, aborta las síntesis pendientes y libera los `blob:` URLs.
+
+### Interrupciones
+
+- **Tocar el orbe mientras habla** corta la respuesta y vuelve a escuchar. Funciona siempre.
+- **Interrumpir hablando** (casilla al pie del modal, se guarda en `localStorage`): el VAD sigue escuchando mientras suena la respuesta, y si detecta voz, la corta y empieza un turno nuevo. Viene **desactivado** porque, con altavoces, el micrófono puede captar la propia voz del asistente aunque haya cancelación de eco. Con auriculares funciona bien.
+
+Cada turno tiene un número (`turnRef`). Al interrumpir se incrementa y se abortan el stream y la cola de audio (`AbortController`). Así, cualquier `await` del turno anterior que termine después ve que ya no es el turno actual y no toca el estado.
+
+### Tarjeta de confirmación (Bizum, inversión)
+
+Si el `done` del stream trae `pending_action`, no se habla nada. Se pausa el micrófono, se muestra la tarjeta (`BizumConfirmModal` / `InvestmentConfirmModal`) y la conversación espera (`confirm`). Los botones llaman a `POST /chat/actions/{action_id}`, y la respuesta del agente (ejecutado o cancelado) se reproduce con el mismo `speakResponse()`. Después se reanuda la escucha.
+
+**La aprobación nunca es por voz.** Decir "sí, confirma" solo genera una propuesta nueva con su propia tarjeta. Así, una frase mal transcrita o una voz de fondo no pueden aprobar un pago. Ver [acciones-langgraph.md](acciones-langgraph.md).
 
 ### Integración con el historial del chat
 
-El VoiceModal recibe `history` como prop (el estado de historial de ChatBox) y lo incluye en la llamada a `/chat/stream`. Esto garantiza que el agente tiene contexto de la conversación anterior, tanto de mensajes escritos como de voz.
-
-Cuando la interacción de voz termina, llama a `onComplete({ userText, assistantText })`, que actualiza el estado de ChatBox:
-
-```javascript
-function handleVoiceComplete({ userText, assistantText }) {
-  setMessages(prev => [...prev,
-    { role: 'user', text: userText },
-    { role: 'assistant', text: assistantText },
-  ])
-  setHistory(prev => [...prev,
-    { role: 'user', content: userText },
-    { role: 'assistant', content: assistantText },
-  ])
-}
-```
-
-Los mensajes de voz aparecen visualmente en el chat igual que los escritos.
+El modal recibe `history` al abrirse y lleva su propio historial (`historyRef`), al que añade cada turno. Así el agente tiene el contexto de toda la conversación por voz, no solo el del momento en que se abrió. Cada turno se notifica también a `onComplete({ userText, assistantText, chartType, chartData, chartTitle })`, que lo añade al chat escrito. Si un turno se interrumpe, se guarda lo que el asistente llegó a decir.
 
 ---
 
@@ -530,13 +495,13 @@ Texto    → POST /chat/stream  ←─── VoiceModal también usa esto
 Voz      → POST /voice/transcribe → texto → POST /chat/stream
 ```
 
-La única diferencia es que el VoiceModal acumula la respuesta completa (todos los tokens del SSE) para luego enviarla a `/voice/synthesize`, mientras que el ChatBox de texto muestra los tokens mientras llegan (streaming en tiempo real).
+La diferencia es qué se hace con los tokens: el ChatBox los pinta según llegan, y el VoiceModal los trocea en frases y las va sintetizando según llegan. Con `voice_mode: true`, el nodo `respond` usa un prompt de respuesta hablada: sin markdown, frases cortas y cifras en palabras.
 
 ---
 
 ## 9. Persistencia de modelos
 
-Los modelos ML se descargan la primera vez que se llama al endpoint correspondiente:
+Los modelos ML se descargan la primera vez que se usan y se **precargan en memoria al arrancar el backend** (`_warm_voice_models` en `main.py`, en un thread para no retrasar el arranque). Sin la precarga, la primera frase tardaba unos 10 s más en transcribirse.
 
 | Evento | Momento | Duración estimada |
 |--------|---------|-------------------|
@@ -560,24 +525,34 @@ docker exec reto-unicaja-backend-1 ls -lh /app/models/whisper/
 
 | Operación | Tiempo típico | Notas |
 |-----------|--------------|-------|
-| Transcripción 5s de audio (Whisper base) | 2-4s | Primer uso tarda más (carga modelo) |
-| Síntesis de 100 palabras (Piper) | 0.5-1s | Muy rápido en CPU |
-| Respuesta del agente | 3-8s | Depende del modelo LLM y nº de tools |
-| **Total ciclo voz** | ~8-15s | Desde fin de habla hasta inicio de audio |
+| Detección de fin de turno (VAD) | 700 ms | `redemptionMs` |
+| Transcripción de una frase (Whisper base) | 1.5-3 s | Precargado al arrancar |
+| Respuesta del agente hasta la primera frase | 3-6 s | Depende del modelo LLM y del nº de tools |
+| Síntesis de una frase (Piper) | 0.3-0.8 s | Se solapa con la reproducción de la anterior |
+| **Fin del habla → primer audio** | ~6-10 s | Antes ~8-15 s, más el tiempo de pulsar para parar |
 
 ### Limitaciones conocidas
 
-1. **No hay detección de silencio automática**: el usuario debe pulsar el orbe para empezar y parar de grabar. No hay VAD (Voice Activity Detection).
+1. **Whisper `base` falla palabras con voces poco claras o con ruido.** En las pruebas con voz sintética de Piper entendió "bicuenta" por "mi cuenta" y "a Marta" como "amarta". Si falla un nombre o un importe, el agente pregunta o la tarjeta de confirmación lo muestra mal y el usuario cancela; nunca se ejecuta nada sin pulsar Confirmar. Para más precisión se puede pasar a `small` (ver abajo), a costa de más latencia.
 
-2. **Una sola vuelta por sesión de voz**: el modal cierra automáticamente después de reproducir la respuesta y vuelve a `idle`. Para otra pregunta, el usuario pulsa el orbe de nuevo.
+2. **Interrumpir hablando con altavoces.** La cancelación de eco del navegador ayuda, pero no es perfecta: el micrófono puede captar la voz del asistente e interrumpirse a sí mismo. Por eso la opción viene desactivada.
 
-3. **Sin modo conversación continua**: la voz no queda escuchando permanentemente. Es "pulsa para hablar", no "hey asistente...".
+3. **Pausas largas al hablar.** Con `redemptionMs: 700`, una pausa larga a mitad de frase se interpreta como fin del turno. Se puede subir a ~1000 ms.
 
-4. **Whisper base tiene limitaciones con acentos fuertes o ruido**: el modelo `base` es bueno pero no perfecto. Para mayor precisión se puede cambiar a `small` o `medium` en `whisper_service.py` (a costa de mayor latencia).
+4. **Piper TTS no tiene control de velocidad/tono en tiempo de ejecución**: la voz es fija según el modelo. Para cambiar la voz, cambiar `VOICE_NAME` y la `_HF_BASE` en `tts_service.py`.
 
-5. **Piper TTS no tiene control de velocidad/tono en tiempo de ejecución**: la voz es fija según el modelo. Para cambiar la voz, cambiar `VOICE_NAME` y la `_HF_BASE` en `tts_service.py`.
+5. **Silencio prolongado.** Tras 20 s sin hablar, la conversación se pausa y se cierra el micrófono, para no dejarlo abierto indefinidamente.
 
-6. **Los pending_action (confirmación de Bizum/inversiones) no funcionan por voz**: si el agente genera un `pending_action`, este aparece en el chat escrito pero el modal de voz no lo gestiona. El usuario debe confirmar por texto.
+### Cómo se ha probado
+
+Con Chromium en modo headless (puppeteer-core) y un **micrófono simulado** (`--use-fake-device-for-media-stream --use-file-for-fake-audio-capture=frase.wav`). La frase se generó con el propio Piper, con silencio antes y después. Se comprobó:
+
+- El VAD detecta inicio y fin de cada frase y envía el WAV.
+- Whisper transcribe y el agente responde.
+- La respuesta se sintetiza en varias frases que empiezan a sonar mientras llega el resto.
+- La escucha se reanuda sola y encadena turnos.
+- Con "interrumpir hablando", la nueva frase corta la respuesta.
+- Un Bizum por voz muestra la tarjeta y, al confirmar, se ejecuta una vez y se lee el resultado.
 
 ### Cambiar a otro modelo de voz
 
@@ -614,11 +589,13 @@ _model = WhisperModel("small", device="cpu", compute_type="int8", ...)
 | `backend/app/services/whisper_service.py` | Singleton STT con faster-whisper |
 | `backend/app/services/tts_service.py` | Singleton TTS con Piper |
 | `backend/app/api/routes/voice.py` | Endpoints FastAPI `/voice/*` |
-| `backend/app/main.py` | Registro del router de voz |
+| `backend/app/main.py` | Registro del router de voz + precarga de modelos al arrancar |
 | `backend/Dockerfile` | ffmpeg + espeak-ng + libsndfile1 |
-| `backend/requirements.txt` | `faster-whisper>=1.0.3`, `piper-tts>=1.2.0` |
+| `backend/requirements.txt` | `faster-whisper>=1.0.3`, `av>=12,<16`, `piper-tts>=1.2.0` |
 | `docker-compose.yml` | Volumen `ml_models`, var `MODEL_CACHE_DIR` |
-| `frontend/src/components/VoiceModal.jsx` | UI completa del orbe animado |
-| `frontend/src/components/ChatBox.jsx` | Botón micrófono + integración VoiceModal |
+| `frontend/src/components/VoiceModal.jsx` | Modo conversación: VAD, máquina de estados, turnos, interrupciones, tarjeta |
+| `frontend/src/services/voice.js` | `transcribeSpeech`, `SentenceSplitter`, `SpeechQueue` |
+| `frontend/src/App.jsx` / `ChatBox.jsx` | Botones que abren el modal (`openVoice`) |
 | `frontend/src/index.css` | Keyframes `orb-idle` y `orb-spin` |
-| `frontend/vite.config.js` | Proxy `/voice` → backend |
+| `frontend/vite.config.js` | Proxy `/voice` → backend + assets del VAD en `/vad/` |
+| `frontend/package.json` | `@ricky0123/vad-web`, `vite-plugin-static-copy` |

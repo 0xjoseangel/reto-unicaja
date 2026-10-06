@@ -41,7 +41,13 @@ def clean_for_tts(text: str) -> str:
 async def transcribe_audio(file: UploadFile = File(...)):
     data = await file.read()
     content_type = file.content_type or ""
-    suffix = ".ogg" if "ogg" in content_type else ".webm"
+    # El modo conversación (VAD en el navegador) envía WAV; MediaRecorder, webm/ogg
+    if "wav" in content_type:
+        suffix = ".wav"
+    elif "ogg" in content_type:
+        suffix = ".ogg"
+    else:
+        suffix = ".webm"
     text = await transcribe(data, suffix)
     if not text:
         raise HTTPException(status_code=400, detail="No se detectó audio")

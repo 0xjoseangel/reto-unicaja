@@ -16,6 +16,9 @@ anthropic>=0.30.0
 yfinance>=0.2.40
 orjson>=3.9.0
 faster-whisper>=1.0.3
+# faster-whisper 1.2 llama a av.open(metadata_errors=...), que av 19 ya no acepta
+# (/voice/transcribe da 500). Probado con av 15.1
+av>=12,<16
 piper-tts>=1.2.0
 apscheduler>=3.10.4
 langgraph>=1.2.0

@@ -1,230 +1,390 @@
 import { useEffect, useRef, useState } from 'react'
+import { MicVAD } from '@ricky0123/vad-web'
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
 import InvestmentConfirmModal from './InvestmentConfirmModal'
-import { apiFetch, apiStream, decideAction, readSSE } from '../services/api'
+import { apiStream, decideAction, readSSE } from '../services/api'
+import { SentenceSplitter, SpeechQueue, transcribeSpeech } from '../services/voice'
+
+// Modo conversación: el VAD (Silero, en el navegador) detecta cuándo empiezas y
+// terminas de hablar, así que no hay que pulsar para parar. Tras cada respuesta el
+// micro se vuelve a abrir solo, hasta cerrar el modal o pasar un rato en silencio.
+//
+//   listening ──(empiezas a hablar)──► hearing ──(700 ms de silencio)──► processing
+//       ▲                                                                    │
+//       └──────────────(termina de hablar el asistente)──── speaking ◄───────┘
+//
+// Mientras procesa y habla, el micro está en pausa para no captarse a sí mismo,
+// salvo que se active "interrumpir hablando" (recomendable solo con auriculares).
+
+const SILENCE_TIMEOUT_MS = 20000
+const BARGE_IN_KEY = 'voice.bargeIn'
 
 const PHASES = {
-  idle: {
-    label: 'Toca para hablar',
-    hint: 'Voz española · Modelo local',
-    orbColor: '#00A651',
-    glowColor: 'rgba(0,166,81,0.45)',
-    animation: 'orb-idle 2.4s ease-in-out infinite',
-    clickable: true,
-  },
-  listening: {
-    label: 'Escuchando...',
-    hint: 'Toca de nuevo para enviar',
-    orbColor: '#E53E3E',
-    glowColor: 'rgba(229,62,62,0.45)',
-    animation: 'none',
-    clickable: true,
-  },
-  processing: {
-    label: 'Procesando...',
+  loading: {
+    label: 'Preparando micrófono...',
     hint: null,
     orbColor: '#444444',
     glowColor: 'rgba(68,68,68,0.35)',
     animation: 'orb-spin 1.2s linear infinite',
-    clickable: false,
+  },
+  idle: {
+    label: 'Conversación en pausa',
+    hint: 'Toca para seguir hablando',
+    orbColor: '#00A651',
+    glowColor: 'rgba(0,166,81,0.45)',
+    animation: 'orb-idle 2.4s ease-in-out infinite',
+  },
+  listening: {
+    label: 'Te escucho',
+    hint: 'Habla cuando quieras · Toca para pausar',
+    orbColor: '#00A651',
+    glowColor: 'rgba(0,166,81,0.45)',
+    animation: 'none',
+  },
+  hearing: {
+    label: 'Escuchando...',
+    hint: 'Cuando termines, haz una pausa',
+    orbColor: '#E53E3E',
+    glowColor: 'rgba(229,62,62,0.45)',
+    animation: 'none',
+  },
+  processing: {
+    label: 'Pensando...',
+    hint: null,
+    orbColor: '#444444',
+    glowColor: 'rgba(68,68,68,0.35)',
+    animation: 'orb-spin 1.2s linear infinite',
   },
   speaking: {
     label: 'Respondiendo...',
-    hint: null,
+    hint: 'Toca para interrumpir',
     orbColor: '#00A651',
     glowColor: 'rgba(0,166,81,0.45)',
     animation: 'orb-idle 0.9s ease-in-out infinite',
-    clickable: false,
+  },
+  confirm: {
+    label: 'Confirma la operación en pantalla',
+    hint: null,
+    orbColor: '#444444',
+    glowColor: 'rgba(68,68,68,0.25)',
+    animation: 'none',
   },
 }
 
+// destroy() falla si el VAD nunca llegó a arrancar (no hay stream que cerrar)
+function destroyVAD(vad) {
+  vad.destroy().catch(() => {})
+}
+
+function readBargeIn() {
+  try { return localStorage.getItem(BARGE_IN_KEY) === '1' } catch { return false }
+}
+
 export default function VoiceModal({ history, onClose, onComplete }) {
-  const [phase, setPhase] = useState('idle')
+  const [phase, setPhaseState] = useState('loading')
   const [orbScale, setOrbScale] = useState(1)
   const [chartInfo, setChartInfo] = useState(null)
+  const [transcript, setTranscript] = useState('')
+  const [error, setError] = useState('')
   const [pendingBizum, setPendingBizum] = useState(null)
   const [pendingInvestment, setPendingInvestment] = useState(null)
+  const [bargeIn, setBargeIn] = useState(readBargeIn)
 
-  const mediaRecorderRef = useRef(null)
-  const audioChunksRef   = useRef([])
-  const streamRef        = useRef(null)
-  const audioCtxRef      = useRef(null)
-  const animFrameRef     = useRef(null)
-  // Texto del usuario que originó la operación pendiente (para el historial)
-  const pendingContextRef = useRef(null)
+  // Los callbacks del VAD se registran una sola vez: todo lo que leen va por refs
+  const phaseRef = useRef('loading')
+  const bargeInRef = useRef(bargeIn)
+  const vadRef = useRef(null)
+  const speechRef = useRef(null)        // SpeechQueue de la respuesta en curso
+  const abortRef = useRef(null)         // AbortController del stream en curso
+  const turnRef = useRef(0)             // se incrementa al interrumpir: invalida el turno anterior
+  const silenceTimerRef = useRef(null)
+  const closedRef = useRef(false)
+  const historyRef = useRef(history || [])
+  const pendingContextRef = useRef(null) // texto del usuario que originó la operación pendiente
+
+  function setPhase(p) {
+    phaseRef.current = p
+    setPhaseState(p)
+    if (p !== 'listening' && p !== 'hearing') setOrbScale(1)
+  }
+
+  // ── Ciclo de vida del VAD ───────────────────────────────────────────────────
 
   useEffect(() => {
+    // En desarrollo, StrictMode monta, desmonta y vuelve a montar: los refs sobreviven
+    let cancelled = false
+    closedRef.current = false
+    MicVAD.new({
+      model: 'v5',
+      baseAssetPath: '/vad/',
+      onnxWASMBasePath: '/vad/',
+      startOnLoad: false,
+      positiveSpeechThreshold: 0.5,
+      negativeSpeechThreshold: 0.35,
+      redemptionMs: 700,      // silencio que marca el final del turno
+      minSpeechMs: 300,       // más corto que esto es ruido (tos, golpe)
+      preSpeechPadMs: 300,    // audio previo que se incluye para no cortar la primera sílaba
+      // El micro se pide con cancelación de eco y supresión de ruido (valores por
+      // defecto de la librería), lo que reduce que capte la voz del propio asistente
+      onSpeechStart: () => handlers.current.onSpeechStart(),
+      onSpeechEnd: audio => handlers.current.onSpeechEnd(audio),
+      onVADMisfire: () => handlers.current.onMisfire(),
+      onFrameProcessed: (_probs, frame) => handlers.current.onFrame(frame),
+    })
+      .then(vad => {
+        if (cancelled) { destroyVAD(vad); return }
+        vadRef.current = vad
+        resumeListening()
+      })
+      .catch(err => {
+        if (!cancelled) onMicError(err)
+      })
+
     return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
-      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
-      if (audioCtxRef.current) audioCtxRef.current.close().catch(() => {})
+      cancelled = true
+      closedRef.current = true
+      clearTimeout(silenceTimerRef.current)
+      speechRef.current?.stop()
+      abortRef.current?.abort()
+      if (vadRef.current) destroyVAD(vadRef.current)
+      vadRef.current = null
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  function startAmplitudeLoop(analyser) {
-    const data = new Uint8Array(analyser.frequencyBinCount)
-    function tick() {
-      analyser.getByteFrequencyData(data)
-      const avg = data.reduce((s, v) => s + v, 0) / data.length
-      setOrbScale(1 + (avg / 255) * 0.45)
-      animFrameRef.current = requestAnimationFrame(tick)
-    }
-    tick()
+  function resumeListening() {
+    if (closedRef.current || pendingContextRef.current || !vadRef.current) return
+    setPhase('listening')
+    // El primer start() es el que pide permiso de micrófono
+    vadRef.current.start().catch(onMicError)
+    armSilenceTimer()
   }
 
-  async function startListening() {
-    setChartInfo(null)
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
-
-      const ctx = new AudioContext()
-      audioCtxRef.current = ctx
-      const source = ctx.createMediaStreamSource(stream)
-      const analyser = ctx.createAnalyser()
-      analyser.fftSize = 256
-      source.connect(analyser)
-      startAmplitudeLoop(analyser)
-
-      const mr = new MediaRecorder(stream)
-      audioChunksRef.current = []
-      mr.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data) }
-      mr.start()
-      mediaRecorderRef.current = mr
-      setPhase('listening')
-    } catch {
-      alert('No se pudo acceder al micrófono. Revisa los permisos del navegador.')
-    }
+  function onMicError(err) {
+    console.error('[VoiceModal] micrófono/VAD', err)
+    clearTimeout(silenceTimerRef.current)
+    setError('No se pudo acceder al micrófono. Revisa los permisos del navegador.')
+    setPhase('idle')
   }
 
-  async function stopListening() {
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
-    setOrbScale(1)
-
-    const mr = mediaRecorderRef.current
-    if (!mr) return
-
-    const blob = await new Promise(resolve => {
-      mr.onstop = () => resolve(new Blob(audioChunksRef.current, { type: 'audio/webm' }))
-      mr.stop()
-    })
-
-    streamRef.current?.getTracks().forEach(t => t.stop())
-    if (audioCtxRef.current) {
-      await audioCtxRef.current.close().catch(() => {})
-      audioCtxRef.current = null
-    }
-
-    setPhase('processing')
-    processAudio(blob)
+  function pauseConversation() {
+    clearTimeout(silenceTimerRef.current)
+    vadRef.current?.pause()
+    setPhase('idle')
   }
 
-  async function processAudio(audioBlob) {
-    try {
-      const form = new FormData()
-      form.append('file', audioBlob, 'audio.webm')
-      const txRes = await apiFetch('/voice/transcribe', { method: 'POST', body: form })
-      if (!txRes.ok) throw new Error('Transcripción fallida')
-      const { text: userText } = await txRes.json()
-      if (!userText.trim()) { setPhase('idle'); return }
-
-      await sendToAgent(userText, history || [])
-    } catch (err) {
-      console.error('[VoiceModal]', err)
-      setPhase('idle')
-    }
+  // Si nadie habla en un rato, se pausa la conversación (no deja el micro abierto)
+  function armSilenceTimer() {
+    clearTimeout(silenceTimerRef.current)
+    silenceTimerRef.current = setTimeout(() => {
+      if (phaseRef.current === 'listening') pauseConversation()
+    }, SILENCE_TIMEOUT_MS)
   }
 
-  async function sendToAgent(userText, currentHistory) {
-    const chatRes = await apiStream('/chat/stream', { message: userText, history: currentHistory, voice_mode: true })
-    if (!chatRes.ok) throw new Error('Chat fallido')
+  // Corta la respuesta en curso (audio y stream) y deja que mande el nuevo turno
+  function interrupt() {
+    turnRef.current += 1
+    speechRef.current?.stop()
+    abortRef.current?.abort()
+  }
 
-    let assistantText = ''
-    let chartType = null, chartData = null, chartTitle = null
-    let pending = null
+  // ── Eventos del VAD ─────────────────────────────────────────────────────────
 
-    await readSSE(chatRes, ev => {
-      if (ev.type === 'token') {
-        assistantText += ev.text
-      } else if (ev.type === 'done') {
-        if (ev.pending_action) {
-          pending = ev.pending_action
-        } else if (ev.chart_type && ev.chart_data?.length) {
-          chartType = ev.chart_type
-          chartData = ev.chart_data
-          chartTitle = ev.chart_title
-          setChartInfo({ type: chartType, data: chartData, title: chartTitle })
-        }
+  const handlers = useRef({})
+  handlers.current = {
+    onSpeechStart() {
+      const p = phaseRef.current
+      if (p === 'speaking' || p === 'processing') {
+        if (!bargeInRef.current) return
+        interrupt()
+      } else if (p !== 'listening') {
+        return
       }
+      clearTimeout(silenceTimerRef.current)
+      setError('')
+      setPhase('hearing')
+    },
+    onMisfire() {
+      if (phaseRef.current === 'hearing') resumeListening()
+    },
+    onSpeechEnd(audio) {
+      if (phaseRef.current !== 'hearing') return
+      vadRef.current?.pause()
+      setPhase('processing')
+      runTurn(audio)
+    },
+    onFrame(frame) {
+      const p = phaseRef.current
+      if (p !== 'listening' && p !== 'hearing') return
+      let sum = 0
+      for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i]
+      const rms = Math.sqrt(sum / frame.length)
+      setOrbScale(1 + Math.min(rms * 8, 0.45))
+    },
+  }
+
+  // ── Un turno: transcribir → agente → hablar ─────────────────────────────────
+
+  async function runTurn(audio) {
+    const turn = turnRef.current
+    try {
+      const userText = await transcribeSpeech(audio)
+      if (turn !== turnRef.current) return
+      if (!userText) { resumeListening(); return }
+      setTranscript(userText)
+      setChartInfo(null)
+
+      const controller = new AbortController()
+      abortRef.current = controller
+      const res = await apiStream(
+        '/chat/stream',
+        { message: userText, history: historyRef.current, voice_mode: true },
+        { signal: controller.signal },
+      )
+      if (!res.ok) throw new Error('Chat fallido')
+      await speakResponse(res, userText, turn)
+    } catch (err) {
+      if (turn !== turnRef.current || err.name === 'AbortError') return
+      console.error('[VoiceModal]', err)
+      setError('Algo ha fallado. Prueba otra vez.')
+      resumeListening()
+    }
+  }
+
+  // Lee la respuesta en streaming y la va diciendo frase a frase mientras llega.
+  // Si el agente propone una operación, en vez de hablar muestra la tarjeta.
+  async function speakResponse(res, userText, turn) {
+    const splitter = new SentenceSplitter()
+    const queue = new SpeechQueue({
+      onStart: () => {
+        if (turn !== turnRef.current) return
+        setPhase('speaking')
+        // Con interrupción activada, el micro escucha mientras habla el asistente
+        if (bargeInRef.current) vadRef.current?.start().catch(onMicError)
+      },
     })
+    speechRef.current = queue
+
+    let text = ''
+    let chart = null
+    let pending = null
+    try {
+      await readSSE(res, ev => {
+        if (ev.type === 'token') {
+          text += ev.text
+          splitter.push(ev.text).forEach(s => queue.push(s))
+        } else if (ev.type === 'done') {
+          pending = ev.pending_action
+          if (ev.chart_type && ev.chart_data?.length) {
+            chart = { type: ev.chart_type, data: ev.chart_data, title: ev.chart_title }
+          }
+        } else if (ev.type === 'error') {
+          text = ev.text
+          queue.push(ev.text)
+        }
+      })
+    } catch (err) {
+      if (err.name !== 'AbortError') throw err
+    }
+    queue.push(splitter.flush())
+    queue.close()
 
     if (pending) {
-      // El agente ha propuesto una operación: se para aquí hasta que el usuario
-      // la apruebe o rechace en el modal (handleActionDecision)
+      queue.stop()
       pendingContextRef.current = { userText }
+      clearTimeout(silenceTimerRef.current)
+      vadRef.current?.pause()
       if (pending.type === 'bizum_confirm') setPendingBizum(pending)
       else setPendingInvestment(pending)
-      setPhase('idle')
+      setPhase('confirm')
       return
     }
 
-    onComplete({ userText, assistantText: assistantText.trim(), chartType, chartData, chartTitle })
-    await speakText(assistantText.trim())
+    // Se guarda el turno aunque se haya interrumpido: el asistente llegó a decirlo
+    if (text.trim()) recordTurn(userText, text.trim(), chart)
+    if (chart && turn === turnRef.current) setChartInfo(chart)
+
+    await queue.done
+    if (turn === turnRef.current && phaseRef.current !== 'hearing') resumeListening()
   }
 
-  async function speakText(text) {
-    setPhase('speaking')
-    try {
-      const ttsRes = await apiFetch('/voice/synthesize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      })
-      if (!ttsRes.ok) { setPhase('idle'); return }
-      const audioData = await ttsRes.arrayBuffer()
-      const audioUrl = URL.createObjectURL(new Blob([audioData], { type: 'audio/wav' }))
-      const audio = new Audio(audioUrl)
-      audio.onended = () => { URL.revokeObjectURL(audioUrl); setPhase('idle') }
-      audio.onerror = () => { URL.revokeObjectURL(audioUrl); setPhase('idle') }
-      audio.play()
-    } catch {
-      setPhase('idle')
-    }
+  function recordTurn(userText, assistantText, chart) {
+    historyRef.current = [
+      ...historyRef.current,
+      { role: 'user', content: userText },
+      { role: 'assistant', content: assistantText },
+    ]
+    onComplete({
+      userText,
+      assistantText,
+      chartType: chart?.type ?? null,
+      chartData: chart?.data ?? null,
+      chartTitle: chart?.title ?? null,
+    })
   }
 
-  // Aprobar o rechazar la operación propuesta. Va al backend con el action_id; el
-  // agente responde (por voz) con el resultado de la ejecución o la cancelación.
+  // ── Tarjeta de confirmación ─────────────────────────────────────────────────
+
+  // Aprobar o rechazar la operación propuesta. Va al backend con el action_id (nunca
+  // por voz: una frase mal transcrita no puede aprobar un pago) y el agente responde
+  // hablando con el resultado. Después se reanuda la conversación.
   async function handleActionDecision(action, decision) {
     const { userText } = pendingContextRef.current
+    pendingContextRef.current = null
     setPendingBizum(null)
     setPendingInvestment(null)
     setPhase('processing')
+    const turn = ++turnRef.current
     try {
-      const res = await decideAction(action.action_id, decision)
-      let responseText = ''
+      const controller = new AbortController()
+      abortRef.current = controller
+      const res = await decideAction(action.action_id, decision, { signal: controller.signal })
       if (res.ok) {
-        await readSSE(res, ev => {
-          if (ev.type === 'token') responseText += ev.text
-          else if (ev.type === 'error') responseText = ev.text
-        })
+        await speakResponse(res, userText, turn)
       } else {
         const err = await res.json().catch(() => ({}))
-        responseText = err.detail || 'No se ha podido procesar la operación.'
+        const msg = err.detail || 'No se ha podido procesar la operación.'
+        const queue = new SpeechQueue({ onStart: () => setPhase('speaking') })
+        speechRef.current = queue
+        queue.push(msg)
+        queue.close()
+        recordTurn(userText, msg, null)
+        await queue.done
+        if (turn === turnRef.current) resumeListening()
       }
-      onComplete({ userText, assistantText: responseText.trim() })
-      await speakText(responseText.trim())
-    } catch {
-      setPhase('idle')
+    } catch (err) {
+      if (err.name === 'AbortError') return
+      setError('Algo ha fallado. Prueba otra vez.')
+      resumeListening()
     }
   }
 
+  // ── Interacción ─────────────────────────────────────────────────────────────
+
   function handleOrbClick() {
-    if (phase === 'idle') startListening()
-    else if (phase === 'listening') stopListening()
+    const p = phaseRef.current
+    if (p === 'idle') {
+      setError('')
+      resumeListening()
+    } else if (p === 'listening' || p === 'hearing') {
+      pauseConversation()
+    } else if (p === 'speaking') {
+      interrupt()
+      resumeListening()
+    }
+  }
+
+  function toggleBargeIn() {
+    const next = !bargeIn
+    setBargeIn(next)
+    bargeInRef.current = next
+    try { localStorage.setItem(BARGE_IN_KEY, next ? '1' : '0') } catch {}
   }
 
   const cfg = PHASES[phase]
+  const clickable = ['idle', 'listening', 'hearing', 'speaking'].includes(phase)
+  const reactive = phase === 'listening' || phase === 'hearing'
 
   const orbStyle = {
     width: 160,
@@ -233,11 +393,11 @@ export default function VoiceModal({ history, onClose, onComplete }) {
     background: `radial-gradient(circle at 38% 36%, ${cfg.orbColor}bb 0%, ${cfg.orbColor} 40%, #003d1f 100%)`,
     boxShadow: `0 0 32px 8px ${cfg.glowColor}`,
     animation: cfg.animation,
-    transform: phase === 'listening' ? `scale(${orbScale})` : undefined,
-    transition: phase === 'listening' ? 'none' : 'transform 0.3s cubic-bezier(0.16,1,0.3,1)',
+    transform: reactive ? `scale(${orbScale})` : undefined,
+    transition: reactive ? 'transform 0.08s linear' : 'transform 0.3s cubic-bezier(0.16,1,0.3,1)',
     border: 'none',
     outline: 'none',
-    cursor: cfg.clickable ? 'pointer' : 'default',
+    cursor: clickable ? 'pointer' : 'default',
   }
 
   return (
@@ -282,13 +442,13 @@ export default function VoiceModal({ history, onClose, onComplete }) {
       </button>
 
       {/* Orb + status */}
-      <div className={`flex flex-col items-center ${chartInfo ? 'pt-12' : 'flex-1 justify-center'}`}>
-        <button style={orbStyle} onClick={handleOrbClick} disabled={!cfg.clickable} />
+      <div className={`flex flex-col items-center px-6 ${chartInfo ? 'pt-12' : 'flex-1 justify-center'}`}>
+        <button style={orbStyle} onClick={handleOrbClick} disabled={!clickable} aria-label={cfg.label} />
 
         <p className="mt-8 text-sm font-medium text-[#111111]">{cfg.label}</p>
 
         <div className="mt-2 h-5 flex items-center gap-1.5">
-          {phase === 'listening' && (
+          {phase === 'hearing' && (
             <span
               className="w-1.5 h-1.5 rounded-full bg-[#E53E3E]"
               style={{ animation: 'dot-bounce 1.2s ease-in-out infinite' }}
@@ -298,11 +458,19 @@ export default function VoiceModal({ history, onClose, onComplete }) {
             <span className="text-xs text-[#AAAAAA]">{cfg.hint}</span>
           )}
         </div>
+
+        {/* Lo último que se ha entendido, para que se vea qué ha transcrito */}
+        {transcript && !error && (
+          <p className="mt-4 max-w-sm text-center text-xs text-[#787774] italic">«{transcript}»</p>
+        )}
+        {error && (
+          <p className="mt-4 max-w-sm text-center text-xs text-[#E53E3E]">{error}</p>
+        )}
       </div>
 
       {/* Chart — aparece debajo del orbe cuando hay datos */}
       {chartInfo && (
-        <div className="w-full px-4 pb-8 pt-6 bubble-animate">
+        <div className="w-full px-4 pt-6 bubble-animate">
           <InlineChart
             chartType={chartInfo.type}
             chartData={chartInfo.data}
@@ -310,6 +478,12 @@ export default function VoiceModal({ history, onClose, onComplete }) {
           />
         </div>
       )}
+
+      {/* Interrumpir hablando: con altavoces el micro puede captar la propia respuesta */}
+      <label className="mt-auto mb-6 pt-6 flex items-center gap-2 text-xs text-[#787774] cursor-pointer select-none">
+        <input type="checkbox" checked={bargeIn} onChange={toggleBargeIn} className="accent-[#00A651]" />
+        Interrumpir hablando (mejor con auriculares)
+      </label>
     </div>
   )
 }

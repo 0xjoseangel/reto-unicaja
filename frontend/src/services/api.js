@@ -13,11 +13,13 @@ export function apiFetch(url, options = {}) {
   })
 }
 
-export function apiStream(url, body) {
+// `signal` (AbortController) permite cortar el stream, p. ej. al interrumpir la voz
+export function apiStream(url, body, { signal } = {}) {
   return apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
 }
 
@@ -67,6 +69,6 @@ export async function readSSE(res, onEvent) {
 
 // Aprueba o rechaza una operación propuesta por el agente (Bizum, inversión).
 // Devuelve la Response: SSE con la respuesta del agente, o 404/409/410 con { detail }.
-export function decideAction(actionId, decision) {
-  return apiStream(`/chat/actions/${actionId}`, { decision })
+export function decideAction(actionId, decision, options) {
+  return apiStream(`/chat/actions/${actionId}`, { decision }, options)
 }
