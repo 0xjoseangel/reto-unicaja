@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { apiStream } from '../services/api'
+import { apiStream, decideAction, readSSE } from '../services/api'
 
 function TypewriterText({ text, active }) {
   // Mensajes históricos (active=false desde el primer render) se muestran al instante
@@ -116,86 +116,8 @@ export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onH
 
     try {
       const res = await apiStream('/chat/stream', { message, history: updatedHistory })
-
       if (!res.ok) throw new Error('Server error')
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let streamingText = ''
-      let assistantAdded = false
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6).trim()
-          if (!raw) continue
-
-          let event
-          try { event = JSON.parse(raw) } catch { continue }
-
-          if (event.type === 'token') {
-            streamingText += event.text
-            if (!assistantAdded) {
-              setMessages(prev => {
-                setStreamingMsgIdx(prev.length)
-                return [...prev, { role: 'assistant', text: streamingText }]
-              })
-              assistantAdded = true
-              setLoading(false)
-            } else {
-              setMessages(prev => {
-                const updated = [...prev]
-                updated[updated.length - 1] = { role: 'assistant', text: streamingText }
-                return updated
-              })
-            }
-
-          } else if (event.type === 'done') {
-            if (event.pending_action?.type === 'bizum_confirm') {
-              if (assistantAdded) setMessages(prev => prev.slice(0, -1))
-              setStreamingMsgIdx(-1)
-              setPendingBizum(event.pending_action)
-              setHistory(updatedHistory)
-              return
-            }
-            if (event.pending_action?.type === 'investment_confirm') {
-              if (assistantAdded) setMessages(prev => prev.slice(0, -1))
-              setStreamingMsgIdx(-1)
-              setPendingInvestment(event.pending_action)
-              setHistory(updatedHistory)
-              return
-            }
-
-            if (!assistantAdded && streamingText) {
-              setMessages(prev => [...prev, { role: 'assistant', text: streamingText }])
-            }
-
-            if (event.chart_type && event.chart_data?.length) {
-              setMessages(prev => [...prev, {
-                role: 'chart',
-                chart: {
-                  type: event.chart_type,
-                  data: event.chart_data,
-                  title: event.chart_title,
-                },
-              }])
-            }
-
-            setHistory([...updatedHistory, { role: 'assistant', content: streamingText }])
-
-          } else if (event.type === 'error') {
-            setMessages(prev => [...prev, { role: 'assistant', text: event.text }])
-          }
-        }
-      }
+      await consumeChatStream(res, updatedHistory)
     } catch {
       setMessages(prev => [
         ...prev,
@@ -207,26 +129,91 @@ export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onH
     }
   }
 
-  function handleBizumConfirm() {
-    const { recipient, amount, concept } = pendingBizum
+  // Pinta la respuesta en streaming del agente (tokens + gráfico) o, si el agente
+  // ha propuesto una operación, abre el modal de confirmación correspondiente.
+  async function consumeChatStream(res, baseHistory) {
+    let streamingText = ''
+    let assistantAdded = false
+
+    await readSSE(res, event => {
+      if (event.type === 'token') {
+        streamingText += event.text
+        if (!assistantAdded) {
+          setMessages(prev => {
+            setStreamingMsgIdx(prev.length)
+            return [...prev, { role: 'assistant', text: streamingText }]
+          })
+          assistantAdded = true
+          setLoading(false)
+        } else {
+          setMessages(prev => {
+            const updated = [...prev]
+            updated[updated.length - 1] = { role: 'assistant', text: streamingText }
+            return updated
+          })
+        }
+
+      } else if (event.type === 'done') {
+        const action = event.pending_action
+        if (action?.type === 'bizum_confirm' || action?.type === 'investment_confirm') {
+          if (assistantAdded) setMessages(prev => prev.slice(0, -1))
+          setStreamingMsgIdx(-1)
+          if (action.type === 'bizum_confirm') setPendingBizum(action)
+          else setPendingInvestment(action)
+          setHistory(baseHistory)
+          return
+        }
+
+        if (!assistantAdded && streamingText) {
+          setMessages(prev => [...prev, { role: 'assistant', text: streamingText }])
+        }
+
+        if (event.chart_type && event.chart_data?.length) {
+          setMessages(prev => [...prev, {
+            role: 'chart',
+            chart: {
+              type: event.chart_type,
+              data: event.chart_data,
+              title: event.chart_title,
+            },
+          }])
+        }
+
+        setHistory([...baseHistory, { role: 'assistant', content: streamingText }])
+
+      } else if (event.type === 'error') {
+        setMessages(prev => [...prev, { role: 'assistant', text: event.text }])
+      }
+    })
+  }
+
+  // Aprobar o rechazar una operación propuesta. La decisión va al backend con el
+  // action_id; es la única forma de que se ejecute (escribir "sí" en el chat no vale).
+  async function handleActionDecision(action, decision) {
     setPendingBizum(null)
-    handleSend(`Sí, confirma el Bizum de ${amount}€ a ${recipient} por ${concept}`)
-  }
-
-  function handleBizumCancel() {
-    setPendingBizum(null)
-    setMessages(prev => [...prev, { role: 'assistant', text: 'Bizum cancelado.' }])
-  }
-
-  function handleInvestmentConfirm() {
-    const { ticker, shares, avg_purchase_price } = pendingInvestment
     setPendingInvestment(null)
-    handleSend(`Sí, confirma la compra de ${shares} acciones de ${ticker} a ${avg_purchase_price} por acción`)
-  }
+    setLoading(true)
 
-  function handleInvestmentCancel() {
-    setPendingInvestment(null)
-    setMessages(prev => [...prev, { role: 'assistant', text: 'Compra cancelada.' }])
+    try {
+      const res = await decideAction(action.action_id, decision)
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', text: err.detail || 'No se ha podido procesar la operación.' },
+        ])
+        return
+      }
+      await consumeChatStream(res, history)
+    } catch {
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', text: 'Lo siento, ha ocurrido un error. ¿Puedes intentarlo de nuevo?' },
+      ])
+    } finally {
+      setLoading(false)
+      setStreamingMsgIdx(-1)
+    }
   }
 
   function handleVoiceComplete({ userText, assistantText, chartType, chartData, chartTitle }) {
@@ -252,8 +239,8 @@ export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onH
           recipient={pendingBizum.recipient}
           amount={pendingBizum.amount}
           concept={pendingBizum.concept}
-          onConfirm={handleBizumConfirm}
-          onCancel={handleBizumCancel}
+          onConfirm={() => handleActionDecision(pendingBizum, 'approve')}
+          onCancel={() => handleActionDecision(pendingBizum, 'reject')}
         />
       )}
       {pendingInvestment && (
@@ -261,10 +248,12 @@ export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onH
           ticker={pendingInvestment.ticker}
           nombre={pendingInvestment.nombre}
           shares={pendingInvestment.shares}
-          avgPrice={pendingInvestment.avg_purchase_price}
+          price={pendingInvestment.price}
+          currency={pendingInvestment.currency}
+          totalEur={pendingInvestment.total_eur}
           investmentType={pendingInvestment.investment_type}
-          onConfirm={handleInvestmentConfirm}
-          onCancel={handleInvestmentCancel}
+          onConfirm={() => handleActionDecision(pendingInvestment, 'approve')}
+          onCancel={() => handleActionDecision(pendingInvestment, 'reject')}
         />
       )}
 

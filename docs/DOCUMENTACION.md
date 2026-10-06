@@ -81,11 +81,13 @@ backend/
 │   ├── services/
 │   │   └── query_service.py      # Funciones de consulta SQL reutilizables
 │   ├── agent/
-│   │   ├── chat_agent.py         # Bucle agente: Groq + tools
-│   │   └── financial_mcp.py      # 12 herramientas MCP (SQLite)
+│   │   ├── graph.py              # Grafo de LangGraph que orquesta el chat
+│   │   ├── chat_agent.py         # Prompts, schemas de tools, fases 1 y 2
+│   │   ├── actions.py            # Validación/aprobación/ejecución de Bizum e inversiones
+│   │   └── financial_mcp.py      # Herramientas de consulta (SQLite) + operaciones de dinero
 │   └── api/
 │       └── routes/
-│           ├── chat.py           # POST /chat/
+│           ├── chat.py           # POST /chat/, /chat/stream, /chat/actions/{id}
 │           └── transactions.py   # GET /transactions/, /summary, /accounts
 ├── seed.py                       # Genera datos de prueba realistas
 ├── requirements.txt
@@ -237,7 +239,11 @@ def get_financial_summary(user_id: int = 1) -> dict:
 
 El decorador `@mcp.tool()` registra la función en el servidor MCP. Pero la función sigue siendo Python normal — se puede llamar directamente, sin ninguna capa extra.
 
-### Las 12 herramientas disponibles
+Las funciones que mueven dinero (`execute_bizum`, `execute_investment`) **no** llevan el decorador ni están en la lista de tools del agente: el modelo no puede llamarlas. Ver [acciones-langgraph.md](acciones-langgraph.md).
+
+### Herramientas principales
+
+Lista resumida; la completa está en `TOOLS_SCHEMA` (`chat_agent.py`). Ninguna recibe el `user_id` del modelo: lo inyecta el servidor a partir del JWT.
 
 | Herramienta | Para qué sirve |
 |---|---|
@@ -251,7 +257,8 @@ El decorador `@mcp.tool()` registra la función en el servidor MCP. Pero la func
 | `search_specific_transactions` | Buscar por nombre de comercio (ej: "Netflix") |
 | `get_recent_transactions` | Últimos movimientos |
 | `get_largest_expenses` | Gastos más grandes de un período |
-| `make_bizum_transfer` | Enviar Bizum (con validación de saldo) |
+| `propose_bizum` | Proponer un Bizum (no ejecuta nada; el usuario lo aprueba en un modal) |
+| `propose_investment` | Proponer la compra de un activo (no ejecuta nada; precio y coste los fija el servidor) |
 | `get_bizum_history` | Historial de Bizums enviados |
 
 ### El bucle agente — cómo funciona por dentro
@@ -275,6 +282,8 @@ Usuario: "¿A qué restaurantes he ido este año?"
 ```
 
 El bucle permite hasta 7 iteraciones por si el modelo necesita llamar varias herramientas encadenadas.
+
+Las dos fases son los nodos `agent` y `respond` de un grafo de LangGraph (`graph.py`). Ver [agente-ia.md §5](agente-ia.md#5-el-agente-como-grafo-de-langgraph).
 
 **Fase 2 — Respuesta estructurada**
 
@@ -311,27 +320,22 @@ const data = await sendChatMessage(message, updatedHistory)
 setHistory([...updatedHistory, { role: "assistant", content: data.response }])
 ```
 
-El historial vive en el frontend (estado React). El backend es stateless — no guarda nada entre peticiones.
+El historial vive en el frontend (estado React); el backend no guarda la conversación entre peticiones. La única excepción son las operaciones pendientes de aprobación (Bizum, inversión): su estado se conserva en el checkpointer de LangGraph y en la tabla `pending_actions` hasta que el usuario decide.
 
-### Bizum — operación financiera real
+### Bizum e inversiones — operaciones que mueven dinero
 
-El Bizum está implementado con protección de dos pasos gracias al contexto conversacional:
+El LLM **no decide** si se ejecuta una operación. Solo puede proponerla, y la ejecuta el código después de que el usuario la apruebe en un modal:
 
 1. Usuario: "Manda 30€ a María"
-2. Modelo entiende que debe pedir confirmación (instrucción en el system prompt)
-3. Modelo responde: "¿Confirmas enviar 30€ a María?"
-4. Usuario: "Sí"
-5. El historial ahora contiene la confirmación → el modelo llama `make_bizum_transfer`
-6. La tool valida saldo, descuenta de la cuenta corriente, crea la transacción
+2. El modelo llama `propose_bizum(recipient="María", amount=30)`. No se ejecuta nada.
+3. El grafo valida la propuesta con código: límite de 2000 €, saldo suficiente. Para una inversión, además fija el precio de mercado y el coste en euros.
+4. El grafo se para (`interrupt()`) y el frontend muestra el modal con los datos validados y un `action_id`.
+5. Usuario pulsa **Confirmar** → `POST /chat/actions/{action_id}` con `{"decision": "approve"}`.
+6. El grafo se reanuda y ejecuta la operación **una sola vez**: descuenta de la cuenta corriente y crea la transacción.
 
-```python
-# Validación dentro de make_bizum_transfer
-if account.balance < amount:
-    return {"success": False, "error": f"Saldo insuficiente. Tienes {account.balance}€"}
+Escribir "sí, confirma" en el chat no ejecuta nada. Un segundo clic en Confirmar devuelve 409, y una propuesta de hace más de 5 minutos, 410.
 
-account.balance = round(account.balance - amount, 2)
-db.commit()
-```
+Detalle completo (grafo, checkpointer, idempotencia, API): [acciones-langgraph.md](acciones-langgraph.md).
 
 ---
 
@@ -460,54 +464,50 @@ Siguiendo "Manda un Bizum de 50€ a Carlos":
 1. FRONTEND
    ChatBox.jsx: handleSend("Manda un Bizum de 50€ a Carlos")
    → history = [{role:"user", content:"Manda un Bizum de 50€ a Carlos"}]
-   → api.js: POST /chat/ con {message, history, user_id}
+   → api.js: POST /chat/stream con {message, history} + JWT
 
 2. BACKEND — ruta
-   chat.py: recibe ChatRequest, extrae history como list[dict]
-   → llama process_chat(message, user_id=1, history)
+   chat.py: recibe ChatRequest; user_id sale del JWT (get_current_user)
+   → process_chat_stream(message, user_id, history)
 
-3. BACKEND — agente (chat_agent.py)
-   _run_chat() construye el array de mensajes:
-   [
-     {role:"system", content: SYSTEM_PROMPT},
-     {role:"user", content: "[user_id=1] Manda un Bizum de 50€ a Carlos"}
-   ]
+3. BACKEND — grafo (graph.py)
+   Estado inicial: messages = [system: SYSTEM_PROMPT, user: "Manda un Bizum..."]
+   thread_id = uuid nuevo
 
-4. GROQ — Fase 1, iteración 1
-   El modelo lee el system prompt y ve: "para Bizum, SIEMPRE confirma antes"
-   → NO llama make_bizum_transfer todavía
-   → Devuelve texto: "Voy a enviar 50€ a Carlos. ¿Confirmas el envío?"
-   → No hay tool_calls → sale del bucle
+4. Nodo agent — Fase 1
+   El modelo llama propose_bizum(recipient="Carlos", amount=50)
+   → se anota la propuesta, no se toca la BD → sale del bucle
 
-5. GROQ — Fase 2
-   Se pide respuesta JSON → chart_type:"none", response_text:"Voy a enviar 50€ a Carlos..."
+5. Nodo validate
+   actions.validate_proposal(): importe ≤ 2000€, saldo ≥ 50€ → OK
+   → crea pending_actions(id=thread_id, status="pending")
 
-6. FRONTEND
-   ChatBox muestra la pregunta de confirmación
-   history = [..., {role:"assistant", content:"Voy a enviar 50€ a Carlos. ¿Confirmas?"}]
-
---- El usuario escribe "Sí" ---
+6. Nodo await_approval
+   interrupt() → el estado se guarda en checkpoints.sqlite
+   → SSE: done {pending_action: {type:"bizum_confirm", action_id, recipient:"Carlos", amount:50}}
 
 7. FRONTEND
-   history = [...anterior..., {role:"user", content:"Sí"}]
-   → POST /chat/ con el historial completo
+   ChatBox muestra el modal de confirmación
 
-8. GROQ — Fase 1, iteración 1
-   El modelo ve en el historial que el usuario confirmó
-   → Llama make_bizum_transfer(recipient="Carlos", amount=50, concept="Bizum")
+--- El usuario pulsa "Confirmar" ---
 
-9. BACKEND — tool execution
-   financial_mcp.py: make_bizum_transfer()
-   → Comprueba que account.balance >= 50
-   → account.balance -= 50
-   → Crea Transaction(category="bizum", description="Bizum a Carlos")
-   → db.commit()
-   → Devuelve {success:true, nuevo_saldo:2800.40}
+8. FRONTEND
+   api.js: decideAction(action_id, "approve") → POST /chat/actions/{action_id}
 
-10. GROQ — Fase 2
-    Con los datos del resultado: response_text:"Bizum enviado. Nuevo saldo: 2800.40€"
+9. BACKEND — ruta
+   actions.decide(): comprueba dueño y caducidad; pending → approved
+   → resume_chat_stream(action_id): Command(resume) sobre el mismo thread
 
-11. FRONTEND
+10. Nodo execute
+    actions.execute(): approved → executed + execute_bizum() en una transacción
+    → account.balance -= 50, Transaction(category="bizum"), BizumTransfer
+    → {success: true, nuevo_saldo_total: ...}
+
+11. Nodo respond — Fase 2
+    El modelo redacta el resultado real: "Bizum enviado a Carlos. Nuevo saldo: ..."
+    → SSE: token, token... done
+
+12. FRONTEND
     ChatBox muestra la confirmación del Bizum
 ```
 
@@ -523,5 +523,6 @@ Siguiendo "Manda un Bizum de 50€ a Carlos":
 | Base de datos | SQLite | Sin servidor, fichero único, perfecto para demos |
 | IA | Groq / Llama 3.3 70B | Rápido, tier gratuito generoso, API OpenAI-compatible |
 | Tools | MCP (FastMCP) | Estándar open source para tool calling con LLMs |
+| Orquestación | LangGraph | Grafo con aprobación humana (`interrupt`) y estado persistido para las operaciones que mueven dinero |
 | Frontend | React + Vite | Componentes reactivos, hot reload, proxy integrado |
 | Gráficos | Recharts | Librería de gráficos para React, simple y flexible |

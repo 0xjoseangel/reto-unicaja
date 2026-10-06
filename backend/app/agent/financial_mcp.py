@@ -409,96 +409,88 @@ def get_spending_analysis(user_id: int = 1) -> dict:
         db.close()
 
 
-@mcp.tool()
-def make_bizum_transfer(
-    recipient: str,
-    amount: float,
-    concept: str = "Bizum",
-    user_id: int = 1,
-) -> dict:
-    """Ejecuta una transferencia Bizum desde la cuenta corriente del usuario.
-    Valida que haya saldo suficiente. Límite: 2000€ por operación.
+class OperationError(Exception):
+    """Fallo de validación de negocio en una operación que mueve dinero
+    (saldo insuficiente, límite superado...). El mensaje se muestra al usuario."""
 
-    IMPORTANTE: Antes de llamar a esta función DEBES haber confirmado con el
-    usuario el destinatario y el importe exacto.
 
-    Args:
-        recipient: Nombre o teléfono del destinatario.
-        amount: Cantidad en euros (debe ser > 0 y <= 2000).
-        concept: Concepto o motivo del Bizum.
-        user_id: ID del usuario.
-    """
+# ── Operaciones que mueven dinero ─────────────────────────────────────────────
+# NO son tools del agente ni del servidor MCP: el LLM no puede llamarlas. Solo las
+# ejecuta el nodo `execute` del grafo (app/agent/graph.py) después de que el usuario
+# haya aprobado la operación. Reciben la sesión del llamante y no hacen commit, para
+# que el cambio de estado de la PendingAction y el movimiento de dinero vayan en la
+# misma transacción (ver app/agent/actions.py).
+
+BIZUM_MAX_AMOUNT = 2000.0
+
+
+def _checking_account(db, user_id: int) -> Account:
+    account = db.query(Account).filter(
+        Account.user_id == user_id,
+        Account.account_type == "corriente",
+    ).first()
+    if not account:
+        raise OperationError("No se encontró cuenta corriente.")
+    return account
+
+
+def check_bizum(db, user_id: int, amount: float) -> Account:
+    """Validaciones de un Bizum. Lanza OperationError si no se puede hacer."""
     if amount <= 0:
-        return {"success": False, "error": "El importe debe ser mayor que 0€."}
-    if amount > 2000:
-        return {"success": False, "error": "El límite por transferencia Bizum es 2000€."}
-
-    db = SessionLocal()
-    try:
-        account = db.query(Account).filter(
-            Account.user_id == user_id,
-            Account.account_type == "corriente",
-        ).first()
-
-        if not account:
-            return {"success": False, "error": "No se encontró cuenta corriente."}
-
-        if account.balance < amount:
-            return {
-                "success": False,
-                "error": (
-                    f"Saldo insuficiente. Tienes {round(account.balance, 2)}€ disponibles "
-                    f"y quieres enviar {round(amount, 2)}€."
-                ),
-                "saldo_disponible": round(account.balance, 2),
-            }
-
-        account.balance = round(account.balance - amount, 2)
-        now = datetime.now()
-
-        transaction = Transaction(
-            account_id=account.id,
-            user_id=user_id,
-            amount=round(amount, 2),
-            transaction_type="gasto",
-            category="bizum",
-            merchant=recipient,
-            description=concept,
-            source="bizum",
-            date=now,
+        raise OperationError("El importe debe ser mayor que 0€.")
+    if amount > BIZUM_MAX_AMOUNT:
+        raise OperationError(f"El límite por transferencia Bizum es {BIZUM_MAX_AMOUNT:.0f}€.")
+    account = _checking_account(db, user_id)
+    if account.balance < amount:
+        raise OperationError(
+            f"Saldo insuficiente. Tienes {round(account.balance, 2)}€ disponibles "
+            f"en la cuenta corriente y quieres enviar {round(amount, 2)}€."
         )
-        db.add(transaction)
+    return account
 
-        bizum_record = BizumTransfer(
-            user_id=user_id,
-            recipient=recipient,
-            amount=round(amount, 2),
-            concept=concept,
-            status="completed",
-            executed_at=now,
-        )
-        db.add(bizum_record)
 
-        db.commit()
+def execute_bizum(db, user_id: int, recipient: str, amount: float, concept: str) -> dict:
+    """Ejecuta un Bizum desde la cuenta corriente. Revalida saldo y límite (pudo
+    cambiar desde la propuesta). No hace commit."""
+    account = check_bizum(db, user_id, amount)
+    amount = round(amount, 2)
+    account.balance = round(account.balance - amount, 2)
+    now = datetime.now()
 
-        all_accounts = db.query(Account).filter(Account.user_id == user_id).all()
-        total_balance = round(sum(a.balance for a in all_accounts), 2)
+    db.add(Transaction(
+        account_id=account.id,
+        user_id=user_id,
+        amount=amount,
+        transaction_type="gasto",
+        category="bizum",
+        merchant=recipient,
+        description=concept,
+        source="bizum",
+        date=now,
+    ))
+    db.add(BizumTransfer(
+        user_id=user_id,
+        recipient=recipient,
+        amount=amount,
+        concept=concept,
+        status="completed",
+        executed_at=now,
+    ))
+    db.flush()
 
-        return {
-            "success": True,
-            "destinatario": recipient,
-            "importe": round(amount, 2),
-            "concepto": concept,
-            "nuevo_saldo_total": total_balance,
-            "nuevo_saldo_cuenta_corriente": account.balance,
-            "nota": "nuevo_saldo_total es la suma de todas tus cuentas.",
-            "fecha": now.strftime("%Y-%m-%d %H:%M"),
-        }
-    except Exception as e:
-        db.rollback()
-        return {"success": False, "error": str(e)}
-    finally:
-        db.close()
+    total_balance = round(sum(
+        a.balance for a in db.query(Account).filter(Account.user_id == user_id).all()
+    ), 2)
+    return {
+        "success": True,
+        "destinatario": recipient,
+        "importe": amount,
+        "concepto": concept,
+        "nuevo_saldo_total": total_balance,
+        "nuevo_saldo_cuenta_corriente": account.balance,
+        "nota": "nuevo_saldo_total es la suma de todas tus cuentas.",
+        "fecha": now.strftime("%Y-%m-%d %H:%M"),
+    }
 
 
 @mcp.tool()
@@ -949,91 +941,117 @@ def get_portfolio_news(user_id: int = 1, max_per_ticker: int = 3) -> dict:
     return {"noticias": noticias}
 
 
-@mcp.tool()
-def add_investment(
-    user_id: int,
-    ticker: str,
-    shares: float,
-    avg_purchase_price: float,
-    investment_type: str = "accion",
-) -> dict:
-    """Registra una compra de activo financiero en la cartera del usuario.
-
-    IMPORTANTE: DEBES haber confirmado con el usuario el ticker, número de acciones
-    y precio de compra ANTES de llamar a esta función.
-
-    Args:
-        user_id: ID del usuario.
-        ticker: Símbolo del activo (ej: AAPL, VOO, SAN.MC, IWDA.AS).
-        shares: Número de acciones/participaciones compradas (> 0).
-        avg_purchase_price: Precio de compra por acción/participación (> 0).
-        investment_type: Tipo: accion, etf, fondo_indexado.
-    """
-    if shares <= 0 or avg_purchase_price <= 0:
-        return {"success": False, "error": "El número de acciones y el precio deben ser mayores que cero."}
-
-    ticker = ticker.upper()
-
+def get_market_quote(ticker: str) -> dict:
+    """Cotización actual de un activo según yfinance. Lanza OperationError si el
+    ticker no existe o no cotiza. El precio de una compra sale de aquí, nunca del LLM."""
+    ticker = ticker.strip().upper()
     try:
         t = yf.Ticker(ticker)
         fast = t.fast_info
+        price = fast.last_price
         info = t.info
-        name = info.get("longName") or info.get("shortName") or ticker
-        currency = getattr(fast, "currency", None) or info.get("currency", "USD")
-        if not fast.last_price:
-            return {"success": False, "error": f"Ticker '{ticker}' no encontrado o sin cotización activa."}
     except Exception as e:
-        return {"success": False, "error": f"Ticker '{ticker}' no válido: {str(e)[:120]}"}
+        raise OperationError(f"Ticker '{ticker}' no válido: {str(e)[:120]}")
+    if not price:
+        raise OperationError(f"Ticker '{ticker}' no encontrado o sin cotización activa.")
+    return {
+        "ticker": ticker,
+        "nombre": info.get("longName") or info.get("shortName") or ticker,
+        "precio": round(float(price), 4),
+        "moneda": getattr(fast, "currency", None) or info.get("currency", "USD"),
+    }
 
-    db = SessionLocal()
+
+def get_eur_rate(currency: str) -> float:
+    """Unidades de `currency` por 1€ (ej: USD → ~1.08). Para convertir a euros:
+    importe_eur = importe / rate."""
+    if currency == "EUR":
+        return 1.0
     try:
-        existing = db.query(Investment).filter(
-            Investment.user_id == user_id,
-            Investment.ticker == ticker,
-        ).first()
+        rate = yf.Ticker(f"EUR{currency}=X").fast_info.last_price
+    except Exception:
+        rate = None
+    if not rate:
+        raise OperationError(f"No se pudo obtener el tipo de cambio EUR/{currency}.")
+    return float(rate)
 
-        if existing:
-            total_shares = existing.shares + shares
-            new_avg = (existing.shares * existing.avg_purchase_price + shares * avg_purchase_price) / total_shares
-            existing.shares = round(total_shares, 6)
-            existing.avg_purchase_price = round(new_avg, 4)
-            db.commit()
-            return {
-                "success": True,
-                "ticker": ticker,
-                "nombre": existing.name,
-                "shares_total": round(total_shares, 6),
-                "precio_medio": round(new_avg, 4),
-                "moneda": currency,
-                "operacion": "actualizado",
-            }
-        else:
-            inv = Investment(
-                user_id=user_id,
-                ticker=ticker,
-                name=name,
-                investment_type=investment_type,
-                shares=round(shares, 6),
-                avg_purchase_price=round(avg_purchase_price, 4),
-                currency=currency,
-                purchase_date=datetime.now(),
-            )
-            db.add(inv)
-            db.commit()
-            return {
-                "success": True,
-                "ticker": ticker,
-                "nombre": name,
-                "shares_total": round(shares, 6),
-                "precio_medio": round(avg_purchase_price, 4),
-                "moneda": currency,
-                "operacion": "añadido",
-            }
-    except Exception as e:
-        db.rollback()
-        return {"success": False, "error": str(e)}
-    finally:
-        db.close()
+
+def execute_investment(
+    db,
+    user_id: int,
+    ticker: str,
+    nombre: str,
+    shares: float,
+    price: float,
+    currency: str,
+    total_eur: float,
+    investment_type: str,
+) -> dict:
+    """Registra una compra en cartera y carga su coste en euros en la cuenta corriente.
+    Los precios llegan ya fijados por el servidor en la validación. No hace commit."""
+    if shares <= 0 or price <= 0 or total_eur <= 0:
+        raise OperationError("El número de acciones y el precio deben ser mayores que cero.")
+
+    account = _checking_account(db, user_id)
+    total_eur = round(total_eur, 2)
+    if account.balance < total_eur:
+        raise OperationError(
+            f"Saldo insuficiente. La compra cuesta {total_eur}€ y tienes "
+            f"{round(account.balance, 2)}€ en la cuenta corriente."
+        )
+
+    now = datetime.now()
+    account.balance = round(account.balance - total_eur, 2)
+    db.add(Transaction(
+        account_id=account.id,
+        user_id=user_id,
+        amount=total_eur,
+        transaction_type="gasto",
+        category="inversion",
+        merchant=nombre,
+        description=f"Compra de {shares:g} {ticker} a {price} {currency}",
+        source="inversion",
+        date=now,
+    ))
+
+    existing = db.query(Investment).filter(
+        Investment.user_id == user_id,
+        Investment.ticker == ticker,
+    ).first()
+    if existing:
+        total_shares = existing.shares + shares
+        new_avg = (existing.shares * existing.avg_purchase_price + shares * price) / total_shares
+        existing.shares = round(total_shares, 6)
+        existing.avg_purchase_price = round(new_avg, 4)
+        operacion = "actualizado"
+    else:
+        db.add(Investment(
+            user_id=user_id,
+            ticker=ticker,
+            name=nombre,
+            investment_type=investment_type,
+            shares=round(shares, 6),
+            avg_purchase_price=round(price, 4),
+            currency=currency,
+            purchase_date=now,
+        ))
+        total_shares, new_avg, operacion = shares, price, "añadido"
+    db.flush()
+
+    return {
+        "success": True,
+        "ticker": ticker,
+        "nombre": nombre,
+        "acciones_compradas": shares,
+        "precio_compra": price,
+        "moneda": currency,
+        "cargo_eur": total_eur,
+        "shares_total": round(total_shares, 6),
+        "precio_medio": round(new_avg, 4),
+        "nuevo_saldo_cuenta_corriente": account.balance,
+        "operacion": operacion,
+        "nota": f"precio_compra y precio_medio están en {currency}; cargo_eur es lo cargado en euros.",
+    }
 
 
 @mcp.tool()

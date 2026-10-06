@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import InlineChart from './InlineChart'
 import BizumConfirmModal from './BizumConfirmModal'
 import InvestmentConfirmModal from './InvestmentConfirmModal'
-import { apiFetch, apiStream } from '../services/api'
+import { apiFetch, apiStream, decideAction, readSSE } from '../services/api'
 
 const PHASES = {
   idle: {
@@ -51,7 +51,7 @@ export default function VoiceModal({ history, onClose, onComplete }) {
   const streamRef        = useRef(null)
   const audioCtxRef      = useRef(null)
   const animFrameRef     = useRef(null)
-  // Stores context needed to complete the confirmation flow
+  // Texto del usuario que originó la operación pendiente (para el historial)
   const pendingContextRef = useRef(null)
 
   useEffect(() => {
@@ -140,52 +140,33 @@ export default function VoiceModal({ history, onClose, onComplete }) {
     const chatRes = await apiStream('/chat/stream', { message: userText, history: currentHistory, voice_mode: true })
     if (!chatRes.ok) throw new Error('Chat fallido')
 
-    const reader = chatRes.body.getReader()
-    const decoder = new TextDecoder()
     let assistantText = ''
     let chartType = null, chartData = null, chartTitle = null
-    let buf = ''
+    let pending = null
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        try {
-          const ev = JSON.parse(line.slice(6).trim())
-          if (ev.type === 'token') {
-            assistantText += ev.text
-          } else if (ev.type === 'done') {
-            if (ev.pending_action?.type === 'bizum_confirm') {
-              pendingContextRef.current = {
-                userText,
-                updatedHistory: [...currentHistory, { role: 'user', content: userText }],
-              }
-              setPendingBizum(ev.pending_action)
-              setPhase('idle')
-              return
-            }
-            if (ev.pending_action?.type === 'investment_confirm') {
-              pendingContextRef.current = {
-                userText,
-                updatedHistory: [...currentHistory, { role: 'user', content: userText }],
-              }
-              setPendingInvestment(ev.pending_action)
-              setPhase('idle')
-              return
-            }
-            if (ev.chart_type && ev.chart_data?.length) {
-              chartType = ev.chart_type
-              chartData = ev.chart_data
-              chartTitle = ev.chart_title
-              setChartInfo({ type: chartType, data: chartData, title: chartTitle })
-            }
-          }
-        } catch {}
+    await readSSE(chatRes, ev => {
+      if (ev.type === 'token') {
+        assistantText += ev.text
+      } else if (ev.type === 'done') {
+        if (ev.pending_action) {
+          pending = ev.pending_action
+        } else if (ev.chart_type && ev.chart_data?.length) {
+          chartType = ev.chart_type
+          chartData = ev.chart_data
+          chartTitle = ev.chart_title
+          setChartInfo({ type: chartType, data: chartData, title: chartTitle })
+        }
       }
+    })
+
+    if (pending) {
+      // El agente ha propuesto una operación: se para aquí hasta que el usuario
+      // la apruebe o rechace en el modal (handleActionDecision)
+      pendingContextRef.current = { userText }
+      if (pending.type === 'bizum_confirm') setPendingBizum(pending)
+      else setPendingInvestment(pending)
+      setPhase('idle')
+      return
     }
 
     onComplete({ userText, assistantText: assistantText.trim(), chartType, chartData, chartTitle })
@@ -212,84 +193,30 @@ export default function VoiceModal({ history, onClose, onComplete }) {
     }
   }
 
-  async function handleBizumConfirm() {
-    const { recipient, amount, concept } = pendingBizum
-    const { userText, updatedHistory } = pendingContextRef.current
-    setPendingBizum(null)
-    setPhase('processing')
-    try {
-      const confirmText = `Sí, confirma el Bizum de ${amount}€ a ${recipient} por ${concept}`
-      const chatRes = await apiStream('/chat/stream', { message: confirmText, history: updatedHistory, voice_mode: true })
-      const reader = chatRes.body.getReader()
-      const decoder = new TextDecoder()
-      let confirmResponse = ''
-      let buf = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const ev = JSON.parse(line.slice(6).trim())
-            if (ev.type === 'token') confirmResponse += ev.text
-          } catch {}
-        }
-      }
-      onComplete({ userText, assistantText: confirmResponse.trim() })
-      await speakText(confirmResponse.trim())
-    } catch {
-      setPhase('idle')
-    }
-  }
-
-  async function handleBizumCancel() {
+  // Aprobar o rechazar la operación propuesta. Va al backend con el action_id; el
+  // agente responde (por voz) con el resultado de la ejecución o la cancelación.
+  async function handleActionDecision(action, decision) {
     const { userText } = pendingContextRef.current
     setPendingBizum(null)
-    onComplete({ userText, assistantText: 'Bizum cancelado.' })
-    await speakText('Bizum cancelado.')
-  }
-
-  async function handleInvestmentConfirm() {
-    const { ticker, shares, avg_purchase_price } = pendingInvestment
-    const { userText, updatedHistory } = pendingContextRef.current
     setPendingInvestment(null)
     setPhase('processing')
     try {
-      const confirmText = `Sí, confirma la compra de ${shares} acciones de ${ticker} a ${avg_purchase_price} por acción`
-      const chatRes = await apiStream('/chat/stream', { message: confirmText, history: updatedHistory, voice_mode: true })
-      const reader = chatRes.body.getReader()
-      const decoder = new TextDecoder()
-      let confirmResponse = ''
-      let buf = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const ev = JSON.parse(line.slice(6).trim())
-            if (ev.type === 'token') confirmResponse += ev.text
-          } catch {}
-        }
+      const res = await decideAction(action.action_id, decision)
+      let responseText = ''
+      if (res.ok) {
+        await readSSE(res, ev => {
+          if (ev.type === 'token') responseText += ev.text
+          else if (ev.type === 'error') responseText = ev.text
+        })
+      } else {
+        const err = await res.json().catch(() => ({}))
+        responseText = err.detail || 'No se ha podido procesar la operación.'
       }
-      onComplete({ userText, assistantText: confirmResponse.trim() })
-      await speakText(confirmResponse.trim())
+      onComplete({ userText, assistantText: responseText.trim() })
+      await speakText(responseText.trim())
     } catch {
       setPhase('idle')
     }
-  }
-
-  async function handleInvestmentCancel() {
-    const { userText } = pendingContextRef.current
-    setPendingInvestment(null)
-    onComplete({ userText, assistantText: 'Compra cancelada.' })
-    await speakText('Compra cancelada.')
   }
 
   function handleOrbClick() {
@@ -324,8 +251,8 @@ export default function VoiceModal({ history, onClose, onComplete }) {
           recipient={pendingBizum.recipient}
           amount={pendingBizum.amount}
           concept={pendingBizum.concept}
-          onConfirm={handleBizumConfirm}
-          onCancel={handleBizumCancel}
+          onConfirm={() => handleActionDecision(pendingBizum, 'approve')}
+          onCancel={() => handleActionDecision(pendingBizum, 'reject')}
         />
       )}
       {pendingInvestment && (
@@ -333,10 +260,12 @@ export default function VoiceModal({ history, onClose, onComplete }) {
           ticker={pendingInvestment.ticker}
           nombre={pendingInvestment.nombre}
           shares={pendingInvestment.shares}
-          avgPrice={pendingInvestment.avg_purchase_price}
+          price={pendingInvestment.price}
+          currency={pendingInvestment.currency}
+          totalEur={pendingInvestment.total_eur}
           investmentType={pendingInvestment.investment_type}
-          onConfirm={handleInvestmentConfirm}
-          onCancel={handleInvestmentCancel}
+          onConfirm={() => handleActionDecision(pendingInvestment, 'approve')}
+          onCancel={() => handleActionDecision(pendingInvestment, 'reject')}
         />
       )}
 

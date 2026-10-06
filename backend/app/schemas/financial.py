@@ -51,19 +51,31 @@ class ChatRequest(BaseModel):
 
 
 class PendingBizumAction(BaseModel):
-    type: Literal["bizum_confirm"]
+    """Bizum validado por el servidor y pendiente de aprobación. Se aprueba o
+    rechaza con POST /chat/actions/{action_id}."""
+    type: Literal["bizum_confirm"] = "bizum_confirm"
+    action_id: str
     recipient: str
     amount: float
     concept: str
 
 
 class PendingInvestmentAction(BaseModel):
-    type: Literal["investment_confirm"]
+    """Compra validada por el servidor: precio de mercado y coste en euros los
+    calcula el backend, no el LLM."""
+    type: Literal["investment_confirm"] = "investment_confirm"
+    action_id: str
     ticker: str
     nombre: str
     shares: float
-    avg_purchase_price: float
+    price: float
+    currency: str
+    total_eur: float
     investment_type: str
+
+
+class ActionDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
 
 
 class ChatResponse(BaseModel):

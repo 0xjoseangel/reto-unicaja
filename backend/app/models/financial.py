@@ -87,6 +87,26 @@ class BizumTransfer(Base):
     user: Mapped["User"] = relationship("User", back_populates="bizum_transfers")
 
 
+class PendingAction(Base):
+    """Operación que mueve dinero propuesta por el agente y pendiente de aprobación.
+
+    Es el registro de auditoría y la barrera de idempotencia del grafo de LangGraph
+    (app/agent/graph.py): el estado solo avanza con UPDATE condicionados
+    (pending → approved/rejected → executed/failed), así que un doble clic o un
+    reintento no puede ejecutar la misma operación dos veces. El id es el thread_id
+    del grafo interrumpido."""
+    __tablename__ = "pending_actions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    action_type: Mapped[str] = mapped_column(String(20), nullable=False)  # bizum | investment
+    payload: Mapped[str] = mapped_column(Text, nullable=False)  # JSON con los datos validados por el servidor
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | approved | rejected | executed | failed | expired
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON con el resultado de la ejecución
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Goal(Base):
     __tablename__ = "goals"
 

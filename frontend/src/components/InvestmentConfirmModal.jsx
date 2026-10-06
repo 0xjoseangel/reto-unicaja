@@ -1,4 +1,4 @@
-export default function InvestmentConfirmModal({ ticker, nombre, shares, avgPrice, investmentType, onConfirm, onCancel }) {
+export default function InvestmentConfirmModal({ ticker, nombre, shares, price, currency, totalEur, investmentType, onConfirm, onCancel }) {
   const typeLabel = { accion: 'Acción', etf: 'ETF', fondo_indexado: 'Fondo indexado' }[investmentType] ?? investmentType
 
   return (
@@ -27,13 +27,15 @@ export default function InvestmentConfirmModal({ ticker, nombre, shares, avgPric
             <Row label="Ticker" value={ticker} />
             <Row label="Tipo" value={typeLabel} />
             <Row label="Acciones" value={shares.toLocaleString('es-ES')} highlight />
-            <Row label="Precio medio"
-                 value={`${avgPrice.toLocaleString('es-ES', { minimumFractionDigits: 2 })} / acción`}
+            <Row label="Precio de mercado"
+                 value={`${price.toLocaleString('es-ES', { minimumFractionDigits: 2 })} ${currency} / acción`} />
+            <Row label="Total a cargar"
+                 value={totalEur.toLocaleString('es-ES', { style: 'currency', currency: 'EUR' })}
                  highlight />
           </div>
 
           <p className="text-xs text-[#787774] leading-relaxed">
-            Comprueba los datos antes de confirmar. Esta operación añadirá el activo a tu cartera.
+            Comprueba los datos antes de confirmar. El importe total se cargará en tu cuenta corriente y el activo se añadirá a tu cartera.
           </p>
 
           {/* Actions */}

@@ -42,3 +42,31 @@ export async function apiGet(url) {
   }
   return res.json()
 }
+
+// Lee un stream SSE (data: {...}\n\n) y llama a onEvent con cada evento parseado
+export async function readSSE(res, onEvent) {
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const raw = line.slice(6).trim()
+      if (!raw) continue
+      let event
+      try { event = JSON.parse(raw) } catch { continue }
+      onEvent(event)
+    }
+  }
+}
+
+// Aprueba o rechaza una operación propuesta por el agente (Bizum, inversión).
+// Devuelve la Response: SSE con la respuesta del agente, o 404/409/410 con { detail }.
+export function decideAction(actionId, decision) {
+  return apiStream(`/chat/actions/${actionId}`, { decision })
+}

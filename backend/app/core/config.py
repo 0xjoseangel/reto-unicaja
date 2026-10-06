@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # Voz
     model_cache_dir: str = "/tmp/models"
 
+    # Checkpointer de LangGraph: estado de los grafos interrumpidos a la espera de
+    # que el usuario apruebe una operación (Bizum, inversión)
+    checkpoint_db_path: str = "./data/checkpoints.sqlite"
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # ignora variables desconocidas en .env

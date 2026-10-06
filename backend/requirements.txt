@@ -18,6 +18,9 @@ orjson>=3.9.0
 faster-whisper>=1.0.3
 piper-tts>=1.2.0
 apscheduler>=3.10.4
+langgraph>=1.2.0
+langgraph-checkpoint-sqlite>=3.0.0
+aiosqlite>=0.20.0
 
 # Dev
 pytest>=8.0.0

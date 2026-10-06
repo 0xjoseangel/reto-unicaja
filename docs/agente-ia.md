@@ -10,7 +10,7 @@ Documentación técnica del sistema conversacional de "Habla con tu dinero".
 2. [La infraestructura](#2-la-infraestructura)
 3. [LiteLLM — la capa de abstracción](#3-litellm--la-capa-de-abstracción)
 4. [La API de Anthropic en detalle](#4-la-api-de-anthropic-en-detalle)
-5. [El agente en dos fases](#5-el-agente-en-dos-fases)
+5. [El agente como grafo de LangGraph](#5-el-agente-como-grafo-de-langgraph)
 6. [Streaming con SSE](#6-streaming-con-sse)
 7. [El ciclo completo de una pregunta](#7-el-ciclo-completo-de-una-pregunta)
 
@@ -24,8 +24,8 @@ Cuando el usuario escribe "¿cuánto gasté en restaurantes este mes?", esto es 
 Usuario (navegador)
     │  POST /chat/stream  {"message": "¿cuánto gasté..."}
     ▼
-FastAPI (backend Python)
-    │  litellm.acompletion(model="anthropic/claude-haiku-4-5", ...)
+FastAPI (backend Python) → grafo de LangGraph (nodo agent)
+    │  litellm.completion(model="anthropic/claude-haiku-4-5", ...)
     ▼
 API de Anthropic (Claude Haiku)
     │  → decide llamar a get_expenses_by_category(category="restaurantes")
@@ -33,7 +33,7 @@ API de Anthropic (Claude Haiku)
 Tool Python (SQLite)
     │  → devuelve {"total": 187.50, "period": "current_month"}
     ▼
-API de Anthropic (segunda llamada)
+API de Anthropic (nodo respond, en streaming)
     │  → genera respuesta en texto + JSON del gráfico
     ▼
 FastAPI (streaming SSE)
@@ -44,7 +44,9 @@ FastAPI (streaming SSE)
 Usuario (texto aparece progresivamente en pantalla)
 ```
 
-El sistema tiene tres piezas clave que conviene entender por separado: **la infraestructura** (cómo se comunican las partes), **LiteLLM** (cómo se habla con los modelos de IA), y **el agente** (la lógica de dos fases que decide qué hacer).
+El sistema tiene tres piezas clave que conviene entender por separado: **la infraestructura** (cómo se comunican las partes), **LiteLLM** (cómo se habla con los modelos de IA), y **el agente**: un grafo de LangGraph que encadena las dos fases (consultar datos con tools y redactar la respuesta).
+
+Las operaciones que mueven dinero (Bizum, comprar inversiones) siguen un camino aparte dentro del mismo grafo. El LLM solo puede *proponerlas*; el código las valida, el usuario las aprueba en un modal y solo entonces se ejecutan. Está explicado en detalle en [acciones-langgraph.md](acciones-langgraph.md).
 
 ---
 
@@ -294,14 +296,14 @@ TOOLS_SCHEMA = [
                     "period": {
                         "type": "string",
                         "enum": ["current_month", "last_month", "last_3_months", "all_time"]
-                    },
-                    "user_id": {"type": "integer"}
+                    }
+                    # sin user_id: lo inyecta el servidor, el modelo no lo ve
                 },
                 "required": ["category"]
             }
         }
     },
-    # ... 22 tools más
+    # ... 25 tools más
 ]
 ```
 
@@ -322,15 +324,26 @@ Cada `chunk` tiene un pequeño fragmento del texto. El código los acumula y los
 
 ---
 
-## 5. El agente en dos fases
+## 5. El agente como grafo de LangGraph
 
-El agente (`chat_agent.py`) orquesta todo. Funciona en dos fases secuenciales.
+El chat es un grafo de LangGraph (`graph.py`). Las piezas que usan sus nodos (prompts, schemas de tools y las dos fases) están en `chat_agent.py`:
 
-### Fase 1 — Recopilación de datos con tools
+```
+START → agent ──(sin propuesta)──────────────────────────────→ respond → END
+          └─(propuesta Bizum/inversión)→ validate → await_approval → execute → respond
+```
+
+- **`agent`**: Fase 1, recopilar datos con tools.
+- **`respond`**: Fase 2, redactar la respuesta en streaming.
+- **`validate` → `await_approval` → `execute`**: solo cuando el modelo propone mover dinero. Se explica en [acciones-langgraph.md](acciones-langgraph.md).
+
+Una pregunta normal ("¿cuánto gasté en restaurantes?") recorre `agent → respond`, que son las dos fases de siempre.
+
+### Fase 1 — Recopilación de datos con tools (nodo `agent`)
 
 ```python
-# _run_tool_loop_async() — corre en un thread (asyncio.to_thread)
-for _ in range(7):   # máximo 7 iteraciones
+# run_tool_loop() en chat_agent.py
+for _ in range(MAX_TOOL_ROUNDS):   # máximo 7 iteraciones
     response = litellm.completion(
         model=model,
         messages=messages,
@@ -343,40 +356,36 @@ for _ in range(7):   # máximo 7 iteraciones
     if not tool_calls:
         break   # Claude no quiere llamar más tools → Fase 1 terminada
 
-    # Ejecutar cada tool que Claude ha pedido
     for tc in tool_calls:
         name = tc.function.name            # "get_expenses_by_category"
         args = json.loads(tc.function.arguments)  # {"category": "restaurantes", ...}
-        func = TOOL_MAP[name]              # función Python real
-        result = func(**args)              # ejecuta la query SQLite
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "content": json.dumps(result)  # resultado de vuelta a Claude
-        })
+
+        if name in PROPOSAL_TOOLS:         # propose_bizum / propose_investment
+            proposal = {**args, "type": ...}   # se anota, NO se ejecuta nada
+        else:
+            result = _call_tool(name, args, user_id)   # query SQLite
+        messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result)})
+
+    if proposal:
+        break   # a partir de aquí decide el grafo, no el modelo
 ```
 
-Al final de Fase 1, `messages` contiene toda la conversación incluidos los resultados de las tools. Claude tiene toda la información que necesita.
+Al final de la Fase 1, `messages` contiene toda la conversación, incluidos los resultados de las tools. Claude tiene toda la información que necesita.
 
-### Por qué en un thread separado
+Dos reglas de seguridad del bucle:
 
-LiteLLM y yfinance son síncronos (bloquean el hilo hasta recibir datos). En Python async, no puedes llamar a funciones síncronas lentas directamente porque bloquearías el event loop (FastAPI no podría atender otras peticiones). La solución es `asyncio.to_thread`:
+- **El `user_id` lo pone el servidor.** Ninguna tool lo expone en su schema. `_call_tool` descarta el que mande el modelo e inyecta el del usuario autenticado (JWT), así que el modelo no puede consultar los datos de otro usuario.
+- **No hay tools que muevan dinero.** Solo existen `propose_bizum` y `propose_investment`, que no tocan la base de datos.
 
-```python
-async def _run_tool_loop_async(messages, model):
-    def _sync():
-        # código síncrono que puede tardar varios segundos
-        ...llamadas a litellm.completion() y yfinance...
-        return messages
+### Por qué no bloquea el servidor
 
-    return await asyncio.to_thread(_sync)
-    # asyncio.to_thread ejecuta _sync en un thread del pool
-    # el event loop queda libre para otras peticiones mientras espera
-```
+LiteLLM (`completion`) y yfinance son síncronos: bloquean el hilo hasta recibir datos. En Python async no se pueden llamar directamente funciones síncronas lentas, porque bloquearían el event loop y FastAPI no podría atender otras peticiones.
 
-### Fase 2 — Respuesta en streaming
+El nodo `agent` es una función síncrona normal, y LangGraph, al ejecutar el grafo en modo async (`astream`), **corre los nodos síncronos en un thread del pool** automáticamente. Es lo mismo que antes se hacía a mano con `asyncio.to_thread`. El nodo `respond` es `async` y usa `litellm.acompletion`.
 
-Una vez terminado el tool loop, se añade el trigger al historial y se hace la llamada final con `stream=True`:
+### Fase 2 — Respuesta en streaming (nodo `respond`)
+
+Una vez terminado el tool loop, `stream_response()` añade el trigger al historial y hace la llamada final con `stream=True`:
 
 ```python
 messages.append({"role": "user", "content": "Escribe ahora la respuesta al usuario."})
@@ -385,6 +394,8 @@ stream = await litellm.acompletion(model=model, messages=messages, stream=True)
 ```
 
 Claude ya tiene todos los datos (están en el historial de mensajes como resultados de tools) y ahora genera la respuesta final. El SYSTEM_PROMPT le dice que termine siempre con `---JSON---` seguido de un JSON con los datos del gráfico.
+
+Si antes hubo una operación (rechazada por validación, cancelada o ejecutada), el grafo antepone al trigger un mensaje `[Sistema] ...` con el resultado real, y el modelo solo lo redacta.
 
 ### Detección del marcador `---JSON---`
 
@@ -411,7 +422,7 @@ async for chunk in stream:
         # Encontramos el marcador
         pending_text = accumulated[:marker_idx][text_yielded:]
         if pending_text:
-            yield SSE_token(pending_text)      # último trozo de texto
+            emit(token(pending_text))          # último trozo de texto
         json_found = True
         json_raw = accumulated[marker_idx + len(_MARKER):]
     else:
@@ -419,11 +430,13 @@ async for chunk in stream:
         # (reservar los últimos len(_MARKER) chars por si el marcador llega partido)
         safe_end = max(text_yielded, len(accumulated) - len(_MARKER))
         if safe_end > text_yielded:
-            yield SSE_token(accumulated[text_yielded:safe_end])
+            emit(token(accumulated[text_yielded:safe_end]))
             text_yielded = safe_end
 ```
 
 El truco de `safe_end` es importante: si el marcador llega partido entre dos chunks (`"\n---"` en uno y `"JSON---\n"` en el siguiente), el código no enviaría el marcador al usuario accidentalmente.
+
+`emit` es el *stream writer* de LangGraph (`get_stream_writer()`): cada token sale del nodo como un evento `custom` del grafo, y `graph.py` lo convierte en una línea SSE.
 
 ---
 
@@ -447,16 +460,18 @@ Cada evento es una línea que empieza por `data: ` y termina con `\n\n` (doble s
 FastAPI usa `StreamingResponse` con un generador asíncrono:
 
 ```python
-async def process_chat_stream(message, user_id, history):
-    # ... Fase 1 tool loop ...
-    # ... Fase 2 streaming ...
+# graph.py
+async def process_chat_stream(message, user_id, history, voice_mode):
+    state = _initial_state(message, user_id, history, voice_mode)
+    cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
 
-    async for chunk in stream:
-        if hay_texto:
-            yield f"data: {json.dumps({'type': 'token', 'text': texto})}\n\n"
-
-    # Al final, evento done con datos del gráfico
-    yield f"data: {json.dumps({'type': 'done', 'chart_type': ..., ...})}\n\n"
+    async for mode, chunk in graph.astream(state, cfg, stream_mode=["custom", "updates"]):
+        if mode == "custom":
+            # token / done emitidos por el nodo respond
+            yield f"data: {json.dumps(chunk)}\n\n"
+        elif "__interrupt__" in chunk:
+            # el grafo se ha parado esperando aprobación → done con pending_action
+            yield f"data: {json.dumps({'type': 'done', 'pending_action': ...})}\n\n"
 
 # En la ruta FastAPI:
 return StreamingResponse(
@@ -469,41 +484,36 @@ return StreamingResponse(
 
 ### Cómo el frontend recibe SSE
 
-El frontend usa la API nativa `fetch` + `ReadableStream`:
+El frontend usa la API nativa `fetch` + `ReadableStream`, envuelta en el helper `readSSE` de `services/api.js` (lo comparten el chat, el modo voz y la aprobación de operaciones):
 
 ```javascript
-const res = await fetch('/chat/stream', {
-    method: 'POST',
-    body: JSON.stringify({ message, user_id: 1, history }),
-})
-
-const reader = res.body.getReader()   // stream de bytes
-const decoder = new TextDecoder()
-let buffer = ''
-
-while (true) {
+export async function readSSE(res, onEvent) {
+  const reader = res.body.getReader()   // stream de bytes
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
     const { done, value } = await reader.read()   // espera el siguiente chunk
     if (done) break
-
     buffer += decoder.decode(value, { stream: true })
 
     // Separar en líneas completas (puede llegar más de una por chunk)
     const lines = buffer.split('\n')
     buffer = lines.pop() ?? ''   // la última línea puede estar incompleta
-
     for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const event = JSON.parse(line.slice(6))
-
-        if (event.type === 'token') {
-            // Actualizar el texto del mensaje en pantalla
-            streamingText += event.text
-            setMessages(prev => [...prev.slice(0, -1), { role: 'assistant', text: streamingText }])
-        } else if (event.type === 'done') {
-            // Mostrar gráfico si hay datos
-        }
+      if (line.startsWith('data: ')) onEvent(JSON.parse(line.slice(6)))
     }
+  }
 }
+
+// ChatBox.jsx
+const res = await apiStream('/chat/stream', { message, history })
+await readSSE(res, event => {
+  if (event.type === 'token') {
+    streamingText += event.text     // actualizar el texto del mensaje en pantalla
+  } else if (event.type === 'done') {
+    // gráfico, o modal de confirmación si viene pending_action
+  }
+})
 ```
 
 ### Los tres tipos de eventos SSE
@@ -511,7 +521,7 @@ while (true) {
 | Evento | Cuándo llega | Qué hace el frontend |
 |--------|-------------|---------------------|
 | `{"type":"token","text":"..."}` | Durante Phase 2, uno por chunk | Añade texto al bubble del asistente |
-| `{"type":"done","chart_type":"...","chart_data":[...],"pending_action":...}` | Al final | Muestra gráfico o modal de confirmación |
+| `{"type":"done","chart_type":"...","chart_data":[...],"pending_action":...}` | Al final | Muestra el gráfico, o el modal de confirmación si `pending_action` no es `null` (lleva un `action_id` validado por el servidor; ver [acciones-langgraph.md](acciones-langgraph.md#7-api-chatstream-y-chatactionsid)) |
 | `{"type":"error","text":"..."}` | Si algo falla | Muestra mensaje de error |
 
 El primer `token` también oculta el spinner de carga (los tres puntos que aparecen mientras Claude piensa en Phase 1).
@@ -530,13 +540,14 @@ t=0ms    FastAPI recibe la petición
          Crea el generador process_chat_stream()
          Devuelve StreamingResponse (la conexión SSE queda abierta)
 
-t=5ms    process_chat_stream() construye messages:
-         [system: SYSTEM_PROMPT, user: "¿cuánto gasté en restaurantes?"]
-         Lanza _run_tool_loop_async() en un thread
+t=5ms    process_chat_stream() construye el estado inicial:
+         messages = [system: SYSTEM_PROMPT, user: "¿cuánto gasté en restaurantes?"]
+         user_id = el del JWT. Lanza graph.astream() con un thread_id nuevo
+         LangGraph ejecuta el nodo agent (síncrono) en un thread del pool
 
 ── PHASE 1 ───────────────────────────────────────────────────────
 t=10ms   Thread → litellm.completion() → POST api.anthropic.com/v1/messages
-         Claude recibe: system prompt + pregunta + 22 tools disponibles
+         Claude recibe: system prompt + pregunta + 26 tools disponibles
 
 t=1500ms Claude responde: tool_use get_expenses_by_category(category="restaurantes")
          Thread ejecuta la función Python → query SQLite
@@ -546,10 +557,10 @@ t=1500ms Claude responde: tool_use get_expenses_by_category(category="restaurant
 t=1510ms Thread → litellm.completion() (2ª llamada a Anthropic)
          Claude recibe: historial + resultado de la tool
          Claude responde: stop_reason="end_turn" (no necesita más datos)
-         Phase 1 terminada. Thread devuelve messages completos.
+         Phase 1 terminada. No hay propuesta → el grafo va directo a respond.
 
 ── PHASE 2 ───────────────────────────────────────────────────────
-t=1510ms process_chat_stream() añade: user: "Escribe ahora la respuesta al usuario."
+t=1510ms Nodo respond añade: user: "Escribe ahora la respuesta al usuario."
          → litellm.acompletion(..., stream=True) → POST api.anthropic.com/v1/messages
 
 t=1700ms Primer chunk llega: "Has"
@@ -569,8 +580,11 @@ t=2450ms Stream termina. json_raw = '{"chart_type":"bar","chart_data":[...],...}
 t=2460ms Frontend recibe "done"
          Renderiza el gráfico de barras bajo el mensaje de texto
 
-t=2460ms Conexión SSE se cierra
+t=2460ms El grafo termina, su thread se borra del checkpointer
+         Conexión SSE se cierra
 ```
+
+Si la pregunta fuera "haz un Bizum de 20€ a Marta", en la Fase 1 Claude llamaría a `propose_bizum` y el grafo pasaría por `validate` y se pararía en `await_approval`: el `done` llegaría con el `pending_action` y sin texto. El flujo completo está en [acciones-langgraph.md §8](acciones-langgraph.md#8-un-bizum-de-punta-a-punta).
 
 **Total:** ~2,5 segundos de los cuales ~1,5s son Phase 1 (tool loop + 2 llamadas a Anthropic) y ~1s es Phase 2 (streaming de texto). El usuario ve el primer texto en pantalla a los ~1,7s y el gráfico a los ~2,5s.
 
@@ -580,12 +594,15 @@ t=2460ms Conexión SSE se cierra
 
 | Archivo | Responsabilidad |
 |---------|----------------|
-| `backend/app/agent/chat_agent.py` | Orquestador: SYSTEM_PROMPT, tool loop, streaming, parseo del marcador |
-| `backend/app/agent/financial_mcp.py` | Las 23 funciones Python que son las "tools" del agente |
-| `backend/app/api/routes/chat.py` | Endpoints FastAPI `/chat/` y `/chat/stream` |
+| `backend/app/agent/graph.py` | Grafo de LangGraph: nodos, aristas, checkpointer, SSE |
+| `backend/app/agent/chat_agent.py` | SYSTEM_PROMPT, schemas de tools, tool loop (Fase 1), streaming y parseo del marcador (Fase 2) |
+| `backend/app/agent/actions.py` | Validación, aprobación y ejecución idempotente de Bizum e inversiones |
+| `backend/app/agent/financial_mcp.py` | Las funciones Python que son las "tools" de lectura del agente, más `execute_bizum` / `execute_investment` (no son tools) |
+| `backend/app/api/routes/chat.py` | Endpoints FastAPI `/chat/`, `/chat/stream` y `/chat/actions/{id}` |
 | `backend/app/models/financial.py` | Modelos SQLAlchemy (tablas de la BD) |
 | `backend/app/schemas/financial.py` | Validación Pydantic de requests/responses |
 | `backend/app/core/config.py` | Configuración (API keys, modelo, BD) desde `.env` |
-| `frontend/src/components/ChatBox.jsx` | UI del chat + lógica de streaming SSE |
+| `frontend/src/components/ChatBox.jsx` | UI del chat + lógica de streaming SSE + modales de confirmación |
+| `frontend/src/services/api.js` | `apiStream`, `readSSE`, `decideAction` |
 | `docker-compose.yml` | Orquestación de contenedores |
 | `backend/seed.py` | Poblar la BD con datos de prueba |

@@ -176,9 +176,10 @@ objetivo real. Para cerrar ese círculo se añadieron tres tools nuevas en
   acumulado; si iguala o supera `target_amount`, marca el objetivo como `completed`
   automáticamente.
 
-**Por qué no llevan `pending_action` de confirmación** (a diferencia de
-`make_bizum_transfer`/`add_investment`): esas dos sí mueven dinero real o registran una
-posición de inversión — son irreversibles o representan un compromiso económico. Crear un
+**Por qué no pasan por aprobación** (a diferencia de los Bizum y las compras de inversiones,
+que el modelo solo puede proponer con `propose_bizum`/`propose_investment` y que el usuario
+aprueba en un modal; ver [acciones-langgraph.md](acciones-langgraph.md)): esas operaciones
+mueven dinero real — son irreversibles o representan un compromiso económico. Crear un
 objetivo es solo una etiqueta de planificación: no descuenta saldo, no genera una
 `Transaction`, y el usuario puede pedir que se corrija sin ninguna consecuencia. Por eso se
 registran en `TOOLS_SCHEMA`/`TOOL_MAP` de `chat_agent.py` como cualquier tool de lectura,

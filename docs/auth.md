@@ -151,6 +151,8 @@ async def summary(
 
 El cambio es idéntico en los tres endpoints de `/transactions/` y en los dos de `/chat/`. El `user_id` del body de `ChatRequest` se eliminó; ahora llega exclusivamente del token.
 
+En el chat, el `user_id` del token llega también a las tools del agente, pero **nunca pasa por el modelo**. Ninguna tool lo expone en su schema, el mensaje del usuario no lo incluye, y el bucle de tools (`_call_tool` en `chat_agent.py`) descarta cualquier `user_id` que mande el modelo e inyecta el del token. Así, un prompt injection no puede hacer que el agente lea u opere sobre la cuenta de otro usuario. El endpoint `POST /chat/actions/{id}`, que aprueba Bizum e inversiones, comprueba además que la operación pertenece al usuario del token (si no, devuelve 404). Ver [acciones-langgraph.md](acciones-langgraph.md).
+
 ---
 
 ## 4. Frontend — AuthContext y fetch autenticado

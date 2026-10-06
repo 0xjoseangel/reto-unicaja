@@ -1,22 +1,22 @@
 """
-Agente conversacional multi-proveedor (Claude / Ollama / Groq) con tool calling.
+Piezas del agente conversacional multi-proveedor (Claude / Ollama / Groq...) con
+tool calling vía litellm. La orquestación vive en graph.py (LangGraph); aquí están
+los prompts, los schemas de tools y las dos fases que usan los nodos del grafo:
 
-Flujo en dos fases:
-  Fase 1 — El modelo llama tools de datos (SQLite) en un bucle hasta tener toda
-            la información que necesita.
-  Fase 2 — Se le pide una respuesta estructurada en JSON con el texto de respuesta
-            y los datos para el gráfico. Claude no soporta response_format json_object
-            así que se usa FINAL_PROMPT con instrucción explícita de devolver JSON.
+  Fase 1 — run_tool_loop(): el modelo llama tools de lectura en bucle hasta tener la
+            información que necesita. Si quiere mover dinero solo puede *proponerlo*
+            (propose_bizum / propose_investment); no tiene ninguna tool que ejecute.
+  Fase 2 — stream_response(): respuesta en streaming con texto + marcador ---JSON---
+            + datos del gráfico.
 """
-import asyncio
 import inspect
 import json
 import os
+from collections.abc import Callable
 
 import litellm
 
 from app.agent.financial_mcp import (
-    add_investment,
     calculate_budget_distribution,
     calculate_compound_interest,
     calculate_loan,
@@ -39,17 +39,10 @@ from app.agent.financial_mcp import (
     get_spending_analysis,
     get_transaction_count,
     list_goals,
-    make_bizum_transfer,
     search_specific_transactions,
     update_goal_progress,
 )
 from app.core.config import settings
-from app.schemas.financial import (
-    ChatResponse,
-    ChartDataPoint,
-    PendingBizumAction,
-    PendingInvestmentAction,
-)
 
 SYSTEM_PROMPT = """Eres un asistente financiero personal. Responde siempre en español.
 
@@ -73,7 +66,7 @@ HERRAMIENTAS DISPONIBLES:
 - search_specific_transactions → buscar por comercio o concepto
 - get_recent_transactions      → últimos movimientos
 - get_largest_expenses         → gastos más grandes de un período
-- make_bizum_transfer          → ejecuta Bizum (solo tras confirmación explícita)
+- propose_bizum                → propone un Bizum (el usuario lo aprueba en pantalla)
 - get_bizum_history            → historial de Bizums
 - calculate_mortgage           → cuota e amortización de hipoteca
 - calculate_loan               → cuota de préstamo personal/coche
@@ -83,41 +76,25 @@ HERRAMIENTAS DISPONIBLES:
 - get_portfolio                → cartera de inversiones con precios reales y rentabilidad
 - get_asset_details            → datos de un activo (precio, PER, dividendo, sector)
 - get_market_overview          → índices globales (S&P500, IBEX, Nasdaq, Oro)
-- add_investment               → registra una compra en cartera (solo tras confirmación explícita)
+- propose_investment           → propone una compra de un activo (el usuario la aprueba en pantalla)
 - create_goal                   → crea un objetivo de ahorro nuevo (no mueve dinero, no requiere confirmación)
 - list_goals                    → lista los objetivos de ahorro del usuario
 - update_goal_progress          → actualiza el importe ahorrado de un objetivo existente
 
 REGLAS CRÍTICAS:
 - Nunca hagas cálculos matemáticos tú mismo. Usa siempre la herramienta correspondiente.
-- Para cualquier acción de Bizum: devuelve pending_action bizum_confirm, NO llames a make_bizum_transfer hasta recibir confirmación explícita.
-- Para registrar una inversión: devuelve pending_action investment_confirm, NO llames a add_investment hasta recibir confirmación explícita. Solo una inversión por pending_action.
-- Para crear/actualizar objetivos: llama directamente a create_goal / update_goal_progress, sin pending_action — no es una operación irreversible ni mueve dinero real. Si el usuario no da un importe objetivo o nombre claro, pregúntaselo antes de llamar a la tool.
-- Si el resultado de make_bizum_transfer incluye "nuevo_saldo_total", usa ese valor como saldo actualizado.
+- Para enviar un Bizum: llama a propose_bizum. Para comprar un activo: llama a propose_investment (una sola compra por llamada). Tú no ejecutas operaciones: el sistema las valida y el usuario las aprueba en pantalla. Si falta el destinatario, el importe, el ticker o el número de acciones, pregúntaselo al usuario en vez de inventarlo.
+- Un mensaje del usuario del tipo "sí, confirma" NO ejecuta nada: la aprobación solo se hace con el botón del modal.
+- Para crear/actualizar objetivos: llama directamente a create_goal / update_goal_progress — no es una operación irreversible ni mueve dinero real. Si el usuario no da un importe objetivo o nombre claro, pregúntaselo antes de llamar a la tool.
 - Para gráficos: cartera → pie (valor actual por activo); categorías → pie o bar; evolución temporal → line.
 
 FORMATO DE SALIDA (Fase 2 — al generar la respuesta):
 Escribe el texto de respuesta y termina SIEMPRE con este bloque exacto:
 ---JSON---
-{"chart_type":"none","chart_data":[],"chart_title":"","pending_action":null}
+{"chart_type":"none","chart_data":[],"chart_title":""}
 
 Valores de chart_type: "bar" (comparar), "line" (temporal), "pie" (distribución), "none" (sin gráfico).
 chart_data: [{"name":"X","value":0},...] — solo si hay gráfico.
-
-Para Bizum sin confirmar, texto vacío y:
----JSON---
-{"chart_type":"none","chart_data":[],"chart_title":"","pending_action":{"type":"bizum_confirm","recipient":"Nombre","amount":50.0,"concept":"Concepto"}}
-
-Para inversión sin confirmar (UNA sola inversión, ticker real de yfinance, shares > 0), texto vacío y:
----JSON---
-{"chart_type":"none","chart_data":[],"chart_title":"","pending_action":{"type":"investment_confirm","ticker":"AAPL","nombre":"Apple Inc.","shares":5,"avg_purchase_price":150.00,"investment_type":"accion"}}
-"""
-
-FINAL_PROMPT = """Genera la respuesta final en JSON (sin bloques de código):
-{"response_text":"...","chart_type":"none","chart_data":"[]","chart_title":"","pending_action":null}
-
-response_text en español, sin emojis, con **negrita** para cifras, listas (-) y tablas si procede.
-chart_data es un string JSON array: "[{\\"name\\":\\"X\\",\\"value\\":0}]"
 """
 
 # ── Definición de tools en formato OpenAI ────────────────────────────────────
@@ -134,7 +111,7 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "get_financial_summary",
             "description": "Resumen financiero: saldo total de todas las cuentas, ingresos totales históricos, gastos totales históricos y top categorías.",
-            "parameters": {"type": "object", "properties": {"user_id": {"type": "integer"}}},
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -142,7 +119,7 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "get_account_balances",
             "description": "Saldo de cada cuenta por separado (corriente, ahorro, etc.) y saldo total. Úsalo cuando el usuario pregunte por una cuenta específica o cuando necesites distinguir entre cuentas.",
-            "parameters": {"type": "object", "properties": {"user_id": {"type": "integer"}}},
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -154,7 +131,6 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "period": {"type": "string", "enum": _PERIOD},
-                    "user_id": {"type": "integer"},
                 },
             },
         },
@@ -169,7 +145,6 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "category": {"type": "string", "description": _CAT},
                     "period": {"type": "string", "enum": _PERIOD},
-                    "user_id": {"type": "integer"},
                 },
                 "required": ["category"],
             },
@@ -184,7 +159,6 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "category": {"type": "string", "description": _CAT},
-                    "user_id": {"type": "integer"},
                 },
                 "required": ["category"],
             },
@@ -199,7 +173,6 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "period": {"type": "string", "enum": _PERIOD},
-                    "user_id": {"type": "integer"},
                 },
             },
         },
@@ -214,7 +187,6 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "category": {"type": "string", "description": _CAT},
                     "period": {"type": "string", "enum": _PERIOD},
-                    "user_id": {"type": "integer"},
                 },
             },
         },
@@ -229,7 +201,6 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "category": {"type": "string", "description": _CAT},
                     "period": {"type": "string", "enum": _PERIOD},
-                    "user_id": {"type": "integer"},
                 },
                 "required": ["category"],
             },
@@ -242,7 +213,7 @@ TOOLS_SCHEMA = [
             "description": "Analiza si el usuario gasta demasiado comparando mes actual con promedio histórico.",
             "parameters": {
                 "type": "object",
-                "properties": {"user_id": {"type": "integer"}},
+                "properties": {},
             },
         },
     },
@@ -256,7 +227,6 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "keyword": {"type": "string"},
                     "limit": {"type": "integer"},
-                    "user_id": {"type": "integer"},
                 },
                 "required": ["keyword"],
             },
@@ -271,7 +241,6 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer"},
-                    "user_id": {"type": "integer"},
                 },
             },
         },
@@ -286,7 +255,6 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "period": {"type": "string", "enum": _PERIOD},
                     "limit": {"type": "integer"},
-                    "user_id": {"type": "integer"},
                 },
             },
         },
@@ -294,11 +262,11 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "make_bizum_transfer",
+            "name": "propose_bizum",
             "description": (
-                "Ejecuta una transferencia Bizum desde la cuenta corriente del usuario. "
-                "IMPORTANTE: DEBES confirmar con el usuario el destinatario y el importe "
-                "ANTES de llamar a esta función. Si no hay confirmación explícita, pregunta primero."
+                "Propone un Bizum desde la cuenta corriente del usuario. NO ejecuta nada: "
+                "el sistema valida la operación y pide al usuario que la apruebe en pantalla. "
+                "Llámala cuando el usuario pida enviar dinero por Bizum y tengas destinatario e importe."
             ),
             "parameters": {
                 "type": "object",
@@ -306,7 +274,6 @@ TOOLS_SCHEMA = [
                     "recipient": {"type": "string", "description": "Nombre o teléfono del destinatario."},
                     "amount": {"type": "number", "description": "Cantidad en euros. Máximo 2000€."},
                     "concept": {"type": "string", "description": "Concepto o motivo del Bizum."},
-                    "user_id": {"type": "integer"},
                 },
                 "required": ["recipient", "amount"],
             },
@@ -321,7 +288,6 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer"},
-                    "user_id": {"type": "integer"},
                 },
             },
         },
@@ -413,7 +379,7 @@ TOOLS_SCHEMA = [
             "description": "Cartera de inversiones del usuario con precios actualizados del mercado y rentabilidad. Para '¿cómo va mi cartera?', '¿cuánto vale mi inversión?', '¿cuánto he ganado o perdido?'.",
             "parameters": {
                 "type": "object",
-                "properties": {"user_id": {"type": "integer"}},
+                "properties": {},
             },
         },
     },
@@ -442,22 +408,20 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "add_investment",
+            "name": "propose_investment",
             "description": (
-                "Registra una compra de activo financiero en la cartera del usuario. "
-                "IMPORTANTE: DEBES pedir confirmación al usuario antes de llamar a esta función. "
-                "Solo llámala cuando el usuario haya confirmado explícitamente."
+                "Propone comprar un activo para la cartera del usuario. NO ejecuta nada: el sistema "
+                "fija el precio de mercado, calcula el coste en euros, comprueba el saldo y pide al "
+                "usuario que apruebe la compra en pantalla. Una sola compra por llamada."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "integer"},
-                    "ticker": {"type": "string", "description": "Símbolo del activo (ej: AAPL, VOO, SAN.MC)."},
-                    "shares": {"type": "number", "description": "Número de acciones/participaciones compradas."},
-                    "avg_purchase_price": {"type": "number", "description": "Precio de compra por acción."},
+                    "ticker": {"type": "string", "description": "Símbolo real de yfinance (ej: AAPL, VOO, SAN.MC)."},
+                    "shares": {"type": "number", "description": "Número de acciones/participaciones a comprar (> 0)."},
                     "investment_type": {"type": "string", "enum": ["accion", "etf", "fondo_indexado"]},
                 },
-                "required": ["user_id", "ticker", "shares", "avg_purchase_price"],
+                "required": ["ticker", "shares"],
             },
         },
     },
@@ -472,13 +436,12 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "integer"},
                     "name": {"type": "string", "description": "Nombre descriptivo del objetivo."},
                     "target_amount": {"type": "number", "description": "Importe objetivo en euros."},
                     "current_amount": {"type": "number", "description": "Importe ya ahorrado (por defecto 0)."},
                     "deadline": {"type": "string", "description": "Fecha límite en formato YYYY-MM-DD, opcional."},
                 },
-                "required": ["user_id", "name", "target_amount"],
+                "required": ["name", "target_amount"],
             },
         },
     },
@@ -490,7 +453,6 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "integer"},
                     "status": {"type": "string", "enum": ["active", "completed", "cancelled", "all"]},
                 },
             },
@@ -506,7 +468,6 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "goal_id": {"type": "integer", "description": "ID del objetivo (obtenido con list_goals)."},
                     "new_current_amount": {"type": "number", "description": "Nuevo importe total ahorrado."},
-                    "user_id": {"type": "integer"},
                 },
                 "required": ["goal_id", "new_current_amount"],
             },
@@ -527,7 +488,6 @@ TOOL_MAP = {
     "search_specific_transactions": search_specific_transactions,
     "get_recent_transactions": get_recent_transactions,
     "get_largest_expenses": get_largest_expenses,
-    "make_bizum_transfer": make_bizum_transfer,
     "get_bizum_history": get_bizum_history,
     "calculate_mortgage": calculate_mortgage,
     "calculate_loan": calculate_loan,
@@ -537,7 +497,6 @@ TOOL_MAP = {
     "get_portfolio": get_portfolio,
     "get_asset_details": get_asset_details,
     "get_market_overview": get_market_overview,
-    "add_investment": add_investment,
     "create_goal": create_goal,
     "list_goals": list_goals,
     "update_goal_progress": update_goal_progress,
@@ -583,165 +542,6 @@ def _check_api_key(model: str) -> str | None:
     return None
 
 
-# ── Bucle agente ──────────────────────────────────────────────────────────────
-
-def _run_chat(message: str, user_id: int, history: list[dict]) -> ChatResponse:
-    model = _build_model()
-
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    # Inyectar historial previo (solo pares user/assistant en texto plano)
-    for msg in history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-
-    messages.append({"role": "user", "content": f"[user_id={user_id}] {message}"})
-
-    # ── Fase 1: recopilación de datos con tools ───────────────────────────────
-    for _ in range(7):
-        try:
-            response = litellm.completion(
-                model=model,
-                messages=messages,
-                tools=TOOLS_SCHEMA,
-                tool_choice="auto",
-            )
-        except Exception as e:
-            err_str = str(e)
-            if "tool_use_failed" in err_str or "tool call validation" in err_str:
-                break
-            raise
-
-        assistant_msg = response.choices[0].message
-        tool_calls = assistant_msg.tool_calls or []
-
-        assistant_dict: dict = {
-            "role": "assistant",
-            "content": assistant_msg.content or "",
-        }
-        if tool_calls:
-            assistant_dict["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-                for tc in tool_calls
-            ]
-        messages.append(assistant_dict)
-
-        if not tool_calls:
-            break
-
-        for tc in tool_calls:
-            name = tc.function.name
-            args = json.loads(tc.function.arguments)
-            # Coercionar enteros que el modelo a veces envía como string
-            for key in ("user_id", "limit"):
-                if key in args and isinstance(args[key], str):
-                    try:
-                        args[key] = int(args[key])
-                    except ValueError:
-                        pass
-            func = TOOL_MAP.get(name)
-            if func:
-                # Filtrar parámetros que el modelo haya inventado y no existan en la firma
-                valid = inspect.signature(func).parameters
-                args = {k: v for k, v in args.items() if k in valid}
-                result = func(**args)
-            else:
-                result = {"error": f"tool '{name}' not found"}
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": json.dumps(result, ensure_ascii=False),
-            })
-
-    # ── Fase 2: respuesta estructurada en JSON ────────────────────────────────
-    messages.append({"role": "user", "content": FINAL_PROMPT})
-
-    kwargs: dict = {"model": model, "messages": messages}
-    # Claude no soporta response_format; el resto de proveedores sí
-    if not _is_claude(model):
-        kwargs["response_format"] = {"type": "json_object"}
-
-    final_response = litellm.completion(**kwargs)
-
-    raw = final_response.choices[0].message.content or "{}"
-
-    # Limpiar posibles bloques de código markdown que algunos modelos añaden
-    raw = raw.strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-    data = json.loads(raw)
-
-    chart_type = data.get("chart_type", "none")
-    raw_data = data.get("chart_data", "[]")
-    chart_title = data.get("chart_title") or None
-
-    try:
-        data_list = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
-        if not isinstance(data_list, list):
-            data_list = []
-    except (json.JSONDecodeError, TypeError):
-        data_list = []
-
-    # Normalizar claves: el modelo a veces usa month/total, category/amount, etc.
-    _NAME_KEYS = ("name", "month", "categoria", "category", "nombre", "label")
-    _VALUE_KEYS = ("value", "total", "amount", "monto", "valor")
-
-    def _extract(d: dict, keys: tuple) -> str | float | None:
-        for k in keys:
-            if k in d:
-                return d[k]
-        return None
-
-    normalized = []
-    for d in data_list:
-        n = _extract(d, _NAME_KEYS)
-        v = _extract(d, _VALUE_KEYS)
-        if n is not None and v is not None:
-            try:
-                normalized.append(ChartDataPoint(name=str(n), value=float(v)))
-            except (TypeError, ValueError):
-                pass
-
-    chart_data = normalized or None
-
-    pending_action = None
-    raw_pending = data.get("pending_action")
-    if isinstance(raw_pending, dict):
-        action_type = raw_pending.get("type")
-        try:
-            if action_type == "bizum_confirm":
-                pending_action = PendingBizumAction(
-                    type="bizum_confirm",
-                    recipient=str(raw_pending["recipient"]),
-                    amount=float(raw_pending["amount"]),
-                    concept=str(raw_pending.get("concept", "Bizum")),
-                )
-            elif action_type == "investment_confirm":
-                pending_action = PendingInvestmentAction(
-                    type="investment_confirm",
-                    ticker=str(raw_pending["ticker"]),
-                    nombre=str(raw_pending.get("nombre", raw_pending["ticker"])),
-                    shares=float(raw_pending["shares"]),
-                    avg_purchase_price=float(raw_pending["avg_purchase_price"]),
-                    investment_type=str(raw_pending.get("investment_type", "accion")),
-                )
-        except (KeyError, ValueError, TypeError):
-            pass
-
-    return ChatResponse(
-        response=data.get("response_text", ""),
-        chart_type=chart_type if chart_type != "none" else None,
-        chart_data=chart_data,
-        chart_title=chart_title,
-        pending_action=pending_action,
-    )
-
-
 # ── Prompts para streaming ────────────────────────────────────────────────────
 
 _MARKER = "\n---JSON---\n"
@@ -763,60 +563,93 @@ Ejemplo incorrecto: "**Cartera:** - Apple: +20% - Microsoft: +5%"
 """
 
 
-async def _run_tool_loop_async(messages: list[dict], model: str) -> list[dict]:
-    """Phase 1: tool-calling loop ejecutado en un thread. Devuelve los mensajes actualizados."""
-    def _sync() -> list[dict]:
-        msgs = list(messages)
-        for _ in range(7):
-            try:
-                response = litellm.completion(
-                    model=model, messages=msgs, tools=TOOLS_SCHEMA, tool_choice="auto",
-                )
-            except Exception as e:
-                err_str = str(e)
-                if "tool_use_failed" in err_str or "tool call validation" in err_str:
-                    break
-                raise
+# ── Fase 1: bucle de tools ────────────────────────────────────────────────────
 
-            assistant_msg = response.choices[0].message
-            tool_calls = assistant_msg.tool_calls or []
+# Tools que no ejecutan nada: solo registran la propuesta en el estado del grafo.
+PROPOSAL_TOOLS = {"propose_bizum": "bizum", "propose_investment": "investment"}
+MAX_TOOL_ROUNDS = 7
 
-            assistant_dict: dict = {"role": "assistant", "content": assistant_msg.content or ""}
-            if tool_calls:
-                assistant_dict["tool_calls"] = [
-                    {"id": tc.id, "type": "function",
-                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            msgs.append(assistant_dict)
 
-            if not tool_calls:
+def _call_tool(name: str, args: dict, user_id: int) -> dict:
+    func = TOOL_MAP.get(name)
+    if not func:
+        return {"error": f"tool '{name}' not found"}
+    # Filtrar parámetros que el modelo haya inventado y no existan en la firma
+    valid = inspect.signature(func).parameters
+    args = {k: v for k, v in args.items() if k in valid and k != "user_id"}
+    # El user_id lo pone siempre el servidor (sale del JWT), nunca el modelo
+    if "user_id" in valid:
+        args["user_id"] = user_id
+    if isinstance(args.get("limit"), str):
+        try:
+            args["limit"] = int(args["limit"])
+        except ValueError:
+            args.pop("limit")
+    try:
+        return func(**args)
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+def run_tool_loop(messages: list[dict], model: str, user_id: int) -> tuple[list[dict], dict | None]:
+    """Fase 1 (nodo `agent` del grafo): el modelo llama tools de lectura en bucle.
+
+    Devuelve los mensajes actualizados y, si el modelo ha llamado a una tool de
+    propuesta, la propuesta en crudo ({"type": "bizum" | "investment", ...args}).
+    Una propuesta corta el bucle: a partir de ahí decide el grafo, no el modelo."""
+    msgs = list(messages)
+    proposal: dict | None = None
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        try:
+            response = litellm.completion(
+                model=model, messages=msgs, tools=TOOLS_SCHEMA, tool_choice="auto",
+            )
+        except Exception as e:
+            err_str = str(e)
+            if "tool_use_failed" in err_str or "tool call validation" in err_str:
                 break
+            raise
 
-            for tc in tool_calls:
-                name = tc.function.name
-                args = json.loads(tc.function.arguments)
-                for key in ("user_id", "limit"):
-                    if key in args and isinstance(args[key], str):
-                        try:
-                            args[key] = int(args[key])
-                        except ValueError:
-                            pass
-                func = TOOL_MAP.get(name)
-                if func:
-                    valid = inspect.signature(func).parameters
-                    args = {k: v for k, v in args.items() if k in valid}
-                    result = func(**args)
+        assistant_msg = response.choices[0].message
+        tool_calls = assistant_msg.tool_calls or []
+
+        assistant_dict: dict = {"role": "assistant", "content": assistant_msg.content or ""}
+        if tool_calls:
+            assistant_dict["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ]
+        msgs.append(assistant_dict)
+
+        if not tool_calls:
+            break
+
+        for tc in tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if name in PROPOSAL_TOOLS:
+                if proposal is None:
+                    proposal = {**args, "type": PROPOSAL_TOOLS[name]}
+                    result = {"status": "Propuesta registrada. El sistema la valida y pide aprobación al usuario."}
                 else:
-                    result = {"error": f"tool '{name}' not found"}
-                msgs.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": json.dumps(result, ensure_ascii=False),
-                })
-        return msgs
+                    result = {"error": "Solo se puede proponer una operación por mensaje."}
+            else:
+                result = _call_tool(name, args, user_id)
+            msgs.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
 
-    return await asyncio.to_thread(_sync)
+        if proposal:
+            break
+
+    return msgs, proposal
 
 
 def _parse_chart(raw_chart: list | str) -> list[dict]:
@@ -841,73 +674,67 @@ def _parse_chart(raw_chart: list | str) -> list[dict]:
     return normalized
 
 
-async def process_chat_stream(message: str, user_id: int = 1, history: list[dict] | None = None, voice_mode: bool = False):
-    """Async generator — SSE: tokens de texto + evento done. Una sola llamada al modelo en Phase 2."""
-    model = _build_model()
-    key_error = _check_api_key(model)
-    if key_error:
-        yield f"data: {json.dumps({'type': 'error', 'text': key_error})}\n\n"
-        return
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for msg in (history or []):
-        messages.append({"role": msg["role"], "content": msg["content"]})
-    messages.append({"role": "user", "content": f"[user_id={user_id}] {message}"})
+# ── Fase 2: respuesta en streaming ────────────────────────────────────────────
 
-    # Phase 1: tool-calling loop en thread
-    try:
-        messages = await _run_tool_loop_async(messages, model)
-    except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'text': str(e)[:200]})}\n\n"
-        return
+async def stream_response(
+    messages: list[dict],
+    model: str,
+    voice_mode: bool,
+    emit: Callable[[dict], None],
+    context: str | None = None,
+) -> dict:
+    """Fase 2 (nodo `respond` del grafo): una sola llamada en streaming que devuelve
+    texto + marcador + JSON del gráfico. Emite los tokens con `emit` y devuelve
+    {"text", "chart_type", "chart_data", "chart_title"}.
 
-    # Phase 2: streaming combinado — texto + separador + JSON en una sola llamada
+    `context` es información que el grafo añade para redactar la respuesta (resultado
+    de una operación, motivo de un rechazo...)."""
     prompt = COMBINED_PROMPT_VOICE if voice_mode else COMBINED_PROMPT
+    if context:
+        prompt = f"{context}\n\n{prompt}"
     combined_messages = messages + [{"role": "user", "content": prompt}]
     accumulated = ""   # todo el contenido acumulado del stream
     text_yielded = 0   # cuántos caracteres de texto hemos enviado ya
     json_found = False
     json_raw = ""
 
-    try:
-        stream = await litellm.acompletion(model=model, messages=combined_messages, stream=True)
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if not delta:
-                continue
-            accumulated += delta
+    stream = await litellm.acompletion(model=model, messages=combined_messages, stream=True)
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content or ""
+        if not delta:
+            continue
+        accumulated += delta
 
-            if json_found:
-                # Ya encontramos el marcador, acumulamos el JSON
-                json_raw += delta
-                continue
+        if json_found:
+            # Ya encontramos el marcador, acumulamos el JSON
+            json_raw += delta
+            continue
 
-            marker_idx = accumulated.find(_MARKER)
-            if marker_idx != -1:
-                # Encontramos el marcador — enviamos el texto que quedaba pendiente
-                text_before = accumulated[:marker_idx]
-                pending_text = text_before[text_yielded:]
-                if pending_text:
-                    yield f"data: {json.dumps({'type': 'token', 'text': pending_text}, ensure_ascii=False)}\n\n"
-                json_found = True
-                json_raw = accumulated[marker_idx + len(_MARKER):]
-            else:
-                # Todavía no hay marcador — enviamos lo que es seguro
-                # Guardamos los últimos len(_MARKER) chars por si el marcador está partido entre chunks
-                safe_end = max(text_yielded, len(accumulated) - len(_MARKER))
-                if safe_end > text_yielded:
-                    pending_text = accumulated[text_yielded:safe_end]
-                    yield f"data: {json.dumps({'type': 'token', 'text': pending_text}, ensure_ascii=False)}\n\n"
-                    text_yielded = safe_end
+        marker_idx = accumulated.find(_MARKER)
+        if marker_idx != -1:
+            # Encontramos el marcador — enviamos el texto que quedaba pendiente
+            pending_text = accumulated[:marker_idx][text_yielded:]
+            if pending_text:
+                emit({"type": "token", "text": pending_text})
+            text_yielded = marker_idx
+            json_found = True
+            json_raw = accumulated[marker_idx + len(_MARKER):]
+        else:
+            # Todavía no hay marcador — enviamos lo que es seguro
+            # Guardamos los últimos len(_MARKER) chars por si el marcador está partido entre chunks
+            safe_end = max(text_yielded, len(accumulated) - len(_MARKER))
+            if safe_end > text_yielded:
+                emit({"type": "token", "text": accumulated[text_yielded:safe_end]})
+                text_yielded = safe_end
 
-        # Stream terminado — enviar texto restante si el marcador nunca apareció
-        if not json_found:
-            remaining = accumulated[text_yielded:]
-            if remaining:
-                yield f"data: {json.dumps({'type': 'token', 'text': remaining}, ensure_ascii=False)}\n\n"
-
-    except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'text': str(e)[:200]})}\n\n"
-        return
+    # Stream terminado — enviar texto restante si el marcador nunca apareció
+    if not json_found:
+        remaining = accumulated[text_yielded:]
+        if remaining:
+            emit({"type": "token", "text": remaining})
+        text = accumulated
+    else:
+        text = accumulated[:accumulated.find(_MARKER)]
 
     # Parsear JSON del gráfico
     raw = json_raw.strip()
@@ -921,33 +748,9 @@ async def process_chat_stream(message: str, user_id: int = 1, history: list[dict
 
     chart_type = data.get("chart_type", "none")
     normalized = _parse_chart(data.get("chart_data", []))
-
-    done_event = {
-        "type": "done",
-        "chart_type": chart_type if chart_type != "none" else None,
-        "chart_data": normalized if normalized else None,
+    return {
+        "text": text.strip(),
+        "chart_type": chart_type if chart_type in ("bar", "line", "pie") and normalized else None,
+        "chart_data": normalized or None,
         "chart_title": data.get("chart_title") or None,
-        "pending_action": data.get("pending_action"),
     }
-    yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
-
-
-async def process_chat(message: str, user_id: int = 1, history: list[dict] | None = None) -> ChatResponse:
-    model = _build_model()
-    key_error = _check_api_key(model)
-    if key_error:
-        return ChatResponse(response=key_error)
-
-    try:
-        return await asyncio.to_thread(_run_chat, message, user_id, history or [])
-    except Exception as e:
-        err = str(e)
-        if "429" in err or "rate_limit" in err.lower():
-            return ChatResponse(
-                response="El modelo está ocupado ahora mismo. Espera unos segundos e inténtalo de nuevo."
-            )
-        if "401" in err or "invalid_api_key" in err.lower() or "authentication" in err.lower():
-            return ChatResponse(
-                response="API key inválida. Revisa el archivo backend/.env"
-            )
-        return ChatResponse(response=f"Error inesperado: {err[:200]}")
