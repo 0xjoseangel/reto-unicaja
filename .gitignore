@@ -19,6 +19,9 @@ env/
 *.db
 backend/data/
 
+# Caché de modelos ML (Whisper/Piper) montada por Docker — no es código del repo
+backend/models/
+
 # Variables de entorno con secretos
 .env
 .env.local
