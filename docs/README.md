@@ -1,12 +1,4 @@
-# Documentación técnica — "Habla con tu dinero"
-
-Índice pedagógico, pensado para repasar en profundidad cómo está construido el
-proyecto (útil de cara a preguntas del jurado). Cada capítulo enlaza al documento
-que lo trata en detalle; no se repite contenido entre capítulos.
-
-Para una visión breve orientada a reclutadores, ver el [README raíz](../README.md).
-Para una versión resumida orientada al jurado, ver [`memoria.pdf`](memoria.pdf)
-(compilado desde [`memoria.md`](memoria.md)).
+# Documentación técnica 
 
 ## Capítulos
 
