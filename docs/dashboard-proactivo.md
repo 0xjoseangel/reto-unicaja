@@ -1,14 +1,13 @@
 # Dashboard proactivo generativo + voz flotante
 
-Documentación técnica de la funcionalidad implementada para el punto 4 del `ROADMAP.md`,
-con el pivote real explicado en detalle: no es un dashboard fijo con los mismos widgets
-para todos, sino uno donde **la IA decide qué mostrarle a cada usuario**.
+Documentación técnica del dashboard: no es un conjunto fijo de widgets, sino una
+pantalla donde **la IA decide qué mostrarle a cada usuario**.
 
 ---
 
 ## Índice
 
-1. [Por qué existe esto y qué pivote se hizo](#1-por-qué-existe-esto-y-qué-pivote-se-hizo)
+1. [Visión general](#1-visión-general)
 2. [Vista de conjunto del pipeline](#2-vista-de-conjunto-del-pipeline)
 3. [Backend paso a paso](#3-backend-paso-a-paso)
 4. [Frontend paso a paso](#4-frontend-paso-a-paso)
@@ -17,13 +16,13 @@ para todos, sino uno donde **la IA decide qué mostrarle a cada usuario**.
 
 ---
 
-## 1. Por qué existe esto y qué pivote se hizo
+## 1. Visión general
 
-El `ROADMAP.md` original (punto 4) proponía un dashboard con alertas: un job nocturno
-detecta anomalías y las guarda en la tabla `alerts`, y una página `/dashboard` las lista
-junto a un resumen financiero fijo (saldo, gastos del mes, gráfica de categorías).
-
-Lo que se ha construido va un paso más allá de esa idea original:
+Un dashboard con widgets fijos (saldo, gastos del mes, gráfica de categorías) muestra
+lo mismo a cualquier usuario, independientemente de su situación financiera real. El
+diseño adoptado aquí invierte eso: un job genera, con un LLM, el conjunto de tarjetas
+que tiene sentido mostrar a *ese* usuario concreto, a partir de su contexto financiero
+real.
 
 - **No hay un layout fijo de widgets.** El propio LLM decide, en cada generación, cuántas
   tarjetas mostrar, de qué tipo, con qué severidad y con qué formato (texto, gráfico o
@@ -100,9 +99,9 @@ APScheduler (22:00 cada noche)          POST /dashboard/refresh (botón "Actuali
 
 ### 3.1. Modelo `Alert` ampliado
 
-`backend/app/models/financial.py` — la tabla `alerts` ya existía (tipo, título, cuerpo,
-severidad, vista/no vista). Se le añadieron los campos que necesita una tarjeta
-**generativa** en vez de solo texto:
+`backend/app/models/financial.py` — la tabla `alerts` guarda tipo, título, cuerpo,
+severidad y si se ha visto, más los campos que necesita una tarjeta **generativa** en
+vez de solo texto:
 
 | Campo         | Tipo            | Para qué sirve                                          |
 |---------------|-----------------|-----------------------------------------------------------|
@@ -113,9 +112,9 @@ severidad, vista/no vista). Se le añadieron los campos que necesita una tarjeta
 | `cta_prompt`  | `string\|null`  | Pregunta sugerida — se precarga en el chat al hacer click |
 
 Migración: `alembic/versions/33cc8ee0199d_alert_cards.py` (generada con
-`alembic revision --autogenerate` y revisada a mano — se le añadió `server_default='text'`
-a `card_type` porque, al ser `NOT NULL`, SQLite necesita un valor por defecto para
-rellenar filas ya existentes en la tabla al aplicar el `ALTER`).
+`alembic revision --autogenerate` y revisada a mano: `card_type` lleva
+`server_default='text'` porque, al ser `NOT NULL`, SQLite necesita un valor por
+defecto para poder aplicar el `ALTER` sobre una tabla con filas).
 
 ### 3.2. Nueva tool: `get_portfolio_news`
 
@@ -158,14 +157,12 @@ inversiones sin necesidad real, gastando tokens y tiempo de respuesta.
    llamarse tanto desde el scheduler como desde un endpoint sin pelearse con
    `Depends(get_db)` de FastAPI).
 
-### 3.3bis. Objetivos creados desde el chat — cerrando el círculo con `Goal`
+### 3.3bis. Objetivos creados desde el chat — tools sobre `Goal`
 
-Cuando se construyó el dashboard, la tabla `goals` ya existía en el esquema (Fase de
-reestructuración de BD) y `_gather_context` ya la leía para generar tarjetas
-`goal_progress` — pero nada escribía en ella: no había forma de que un usuario creara un
-objetivo real. Para cerrar ese círculo se añadieron tres tools nuevas en
-`financial_mcp.py`, esta vez sí expuestas al chat conversacional (a diferencia de
-`get_portfolio_news`):
+`_gather_context` lee la tabla `goals` para generar tarjetas `goal_progress`, pero
+leerla no basta: el usuario necesita poder crear y actualizar sus objetivos desde el
+chat. Para eso existen tres tools en `financial_mcp.py`, esta vez sí expuestas al chat
+conversacional (a diferencia de `get_portfolio_news`):
 
 - **`create_goal(user_id, name, target_amount, current_amount=0, deadline=None)`** — crea
   la fila `Goal`. Valida que `target_amount > 0` y que `current_amount` no sea negativo ni
@@ -187,8 +184,8 @@ con la única instrucción en el prompt de preguntar primero si falta nombre o i
 
 El efecto práctico: un objetivo creado por chat aparece automáticamente la próxima vez que
 se regenere el dashboard (botón "Actualizar ahora" o job nocturno), porque
-`_gather_context` ya consulta `Goal` sin cambios adicionales — la tabla siempre fue la
-misma, solo faltaba quien escribiera en ella.
+`_gather_context` consulta `Goal` directamente, sin ningún acoplamiento con las tools de
+escritura.
 
 Tests en `backend/tests/test_goal_tools.py`: usan una BD SQLite temporal real (no mocks de
 sesión) porque estas tools hacen `filter`/`order_by` cuya lógica interesa probar de verdad,
@@ -229,13 +226,13 @@ de guardar, sin `id`) y `AlertCardOut` (lo que sirve el endpoint, con `id`/`seen
 
 ### 4.1. `App.jsx` — pestañas + voz global
 
-- Estado `view` (`'dashboard' | 'chat'`) sustituye al render fijo de `<ChatBox />`.
+- Un estado `view` (`'dashboard' | 'chat'`) controla qué pestaña se renderiza.
 - `ChatBox` se mantiene **siempre montado** (oculto con `hidden` cuando no es la pestaña
   activa, no desmontado) para no perder su historial de conversación ni el "handler" de
   voz que registra, al cambiar de pestaña.
-- El `<VoiceModal>` se ha subido de `ChatBox.jsx` a `App.jsx`: ahora vive un nivel por
-  encima de las pestañas y hay un botón flotante (FAB) siempre visible en la esquina
-  inferior derecha, además del botón de micrófono que ya existía dentro del chat.
+- `<VoiceModal>` vive en `App.jsx`, un nivel por encima de las pestañas, con un botón
+  flotante (FAB) siempre visible en la esquina inferior derecha — además del botón de
+  micrófono dentro del propio chat — para poder usar la voz también desde el dashboard.
 - `ChatBox` reporta su `history` a `App.jsx` vía la prop `onHistoryChange` (guardado en un
   `ref`, no en estado, para no forzar renders de `App` en cada mensaje). Así, sea cual sea
   la pestaña activa, `App.jsx` siempre tiene el historial real del chat disponible para
@@ -276,26 +273,27 @@ backend, porque `VoiceModal` ya aceptaba un `history` arbitrario como prop.
 
 ## 5. Decisiones de diseño y su porqué
 
-- **No se usa LangGraph aquí.** El punto 1 del roadmap (LangGraph para confirmaciones de
-  Bizum/inversión) sigue siendo un problema distinto: garantizar que una operación
-  irreversible pase por confirmación humana. Generar tarjetas de dashboard no ejecuta
-  ninguna operación irreversible — solo lee datos y escribe alertas — así que no necesita
-  un grafo con `interrupt()`. Una función Python síncrona con una única llamada al LLM es
-  suficiente, más simple, y más barata en tokens.
+- **No se usa LangGraph aquí.** LangGraph resuelve un problema distinto: garantizar que
+  una operación irreversible (Bizum, inversión) pase por confirmación humana antes de
+  ejecutarse (ver [acciones-langgraph.md](acciones-langgraph.md)). Generar tarjetas de
+  dashboard no ejecuta ninguna operación irreversible — solo lee datos y escribe
+  alertas — así que no necesita un grafo con `interrupt()`. Una función Python síncrona
+  con una única llamada al LLM es suficiente, más simple, y más barata en tokens.
 - **Las tarjetas reutilizan el esquema de gráfica del chat** (`ChartDataPoint`,
   `chart_type: bar|line|pie`) en vez de inventar un formato nuevo — así `InlineChart.jsx`
   se reutiliza sin cambios.
-- **No se añadió `react-router`.** El frontend no tenía routing antes de esto; un estado
-  `view` en `App.jsx` es suficiente para dos pestañas. Si algún día hace falta
-  deep-linking, se puede migrar entonces.
+- **No se usa `react-router`.** Un estado `view` en `App.jsx` es suficiente para
+  alternar entre dos pestañas (dashboard/chat); añadir un router sería sobre-ingeniería
+  para dos vistas sin necesidad de deep-linking.
 - **`yfinance.Ticker(ticker).news`** en vez de una API de noticias nueva — cero
-  credenciales ni dependencias adicionales, y `yfinance` ya estaba en `requirements.txt`.
-- **Tests mínimos, no un framework nuevo.** El proyecto no tenía ningún test antes de esto.
-  Se añadió `pytest` (dependencia de desarrollo) con un único fichero
-  (`backend/tests/test_dashboard_agent.py`) centrado en lo más frágil de la funcionalidad
-  nueva: que el JSON que devuelve el LLM se valide y parsee correctamente, incluyendo casos
-  de JSON malformado o con campos inválidos. La lógica financiera existente (cálculos de
-  saldo, hipotecas, etc.) queda explícitamente fuera de alcance de esta tarea.
+  credenciales ni dependencias adicionales, ya que `yfinance` es una dependencia del
+  proyecto.
+- **Tests centrados en lo más frágil, no en todo el sistema.** `pytest` (dependencia de
+  desarrollo) con `backend/tests/test_dashboard_agent.py`, centrado en que el JSON que
+  devuelve el LLM se valide y parsee correctamente, incluyendo casos de JSON malformado o
+  con campos inválidos — el punto donde una respuesta del modelo puede romper el pipeline.
+  La lógica financiera (cálculos de saldo, hipotecas, etc.) tiene su propia cobertura,
+  fuera del alcance de estos tests.
 
 ## 6. Cómo probarlo
 

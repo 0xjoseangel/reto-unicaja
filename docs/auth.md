@@ -1,6 +1,6 @@
 # Autenticación JWT — Habla con tu dinero
 
-Documentación técnica del sistema de autenticación multi-usuario implementado en la Fase 2 del roadmap.
+Documentación técnica del sistema de autenticación multi-usuario.
 
 ---
 
@@ -18,7 +18,10 @@ Documentación técnica del sistema de autenticación multi-usuario implementado
 
 ## 1. Visión general
 
-Antes de esta fase, `user_id=1` estaba hardcodeado en todos los endpoints y en el frontend. Cualquier petición accedía a los datos del mismo usuario. Esto es suficiente para una demo en local, pero hace inviable el multi-usuario y es lo primero que un evaluador técnico detecta.
+Sin autenticación, cada endpoint tendría que recibir el `user_id` como parámetro
+explícito (o fijarlo a un valor hardcodeado), confiando en que el cliente mande el
+valor correcto. Eso hace inviable el multi-usuario: cualquiera podría leer u operar
+sobre la cuenta de otro simplemente cambiando ese parámetro.
 
 Con JWT (JSON Web Tokens) el flujo es:
 
@@ -130,16 +133,16 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> int:
 
 Cuando FastAPI ve `Depends(oauth2_scheme)`, extrae automáticamente el valor de la cabecera `Authorization: Bearer <token>`. Esto también hace que los endpoints aparezcan como protegidos en `/docs`.
 
-### Cambios en rutas existentes
+### Endpoints protegidos
 
-**Antes (hardcodeado):**
+**Sin autenticación** (`user_id` como parámetro, confiando en el cliente):
 ```python
 @router.get("/summary")
 async def summary(user_id: int = 1, db: Session = Depends(get_db)):
     ...
 ```
 
-**Después (autenticado):**
+**Con autenticación** (`user_id` extraído del token, no del cliente):
 ```python
 @router.get("/summary")
 async def summary(
@@ -149,7 +152,8 @@ async def summary(
     ...
 ```
 
-El cambio es idéntico en los tres endpoints de `/transactions/` y en los dos de `/chat/`. El `user_id` del body de `ChatRequest` se eliminó; ahora llega exclusivamente del token.
+El mismo patrón se aplica en los tres endpoints de `/transactions/` y en los dos de
+`/chat/`. `ChatRequest` no lleva `user_id` en el body: llega exclusivamente del token.
 
 En el chat, el `user_id` del token llega también a las tools del agente, pero **nunca pasa por el modelo**. Ninguna tool lo expone en su schema, el mensaje del usuario no lo incluye, y el bucle de tools (`_call_tool` en `chat_agent.py`) descarta cualquier `user_id` que mande el modelo e inyecta el del token. Así, un prompt injection no puede hacer que el agente lea u opere sobre la cuenta de otro usuario. El endpoint `POST /chat/actions/{id}`, que aprueba Bizum e inversiones, comprueba además que la operación pertenece al usuario del token (si no, devuelve 404). Ver [acciones-langgraph.md](acciones-langgraph.md).
 
@@ -233,7 +237,9 @@ export default function App() {
 }
 ```
 
-No se usa `react-router-dom` en esta fase. El renderizado condicional es suficiente y evita añadir una dependencia innecesaria. Cuando se implemente el dashboard (Fase 4) se añadirá el router para gestionar `/` y `/chat`.
+No se usa `react-router-dom`. El renderizado condicional es suficiente para alternar
+entre login y la app autenticada, y evita añadir una dependencia innecesaria para una
+decisión binaria.
 
 ---
 

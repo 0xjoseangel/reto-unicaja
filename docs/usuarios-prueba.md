@@ -44,4 +44,4 @@ Si la base de datos se creó con una versión anterior del seed, pueden existir 
 - `maria.garcia@test.com`
 - `carlos.ruiz@test.com`
 - `ana.lopez@test.com`
-- `eduardopr94g@gmail.com` — cuenta registrada manualmente vía `/auth/register` en algún momento del desarrollo; no tiene cuentas, transacciones ni metas asociadas, por lo que el chat y el dashboard no tienen nada que mostrarle. No usar para demos.
+- `eduardopr94g@gmail.com` — cuenta creada manualmente vía `/auth/register`, sin cuentas, transacciones ni metas asociadas, por lo que el chat y el dashboard no tienen nada que mostrarle. No usar para demos.

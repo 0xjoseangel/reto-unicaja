@@ -22,9 +22,13 @@ Cómo se ejecutan los Bizum y las compras de inversiones desde el chat y por qu�
 
 ## 1. El problema
 
-Antes, el chat era un único bucle de tool calling con litellm. Las tools `make_bizum_transfer` y `add_investment` estaban en la lista de tools del modelo junto a las de consulta. La única barrera para que se ejecutaran sin permiso era una frase en el prompt: *"NO llames a make_bizum_transfer hasta recibir confirmación explícita"*.
+Un diseño ingenuo pondría `make_bizum_transfer` y `add_investment` en la misma lista
+de tools que las de consulta, dentro de un único bucle de tool calling con litellm, y
+confiaría en una frase del prompt para frenarlas: *"NO llames a make_bizum_transfer
+hasta recibir confirmación explícita"*.
 
-En la práctica, eso dejaba estos agujeros:
+Esa barrera es solo una instrucción en lenguaje natural, no una restricción de
+código, y deja estos agujeros:
 
 | # | Problema | Consecuencia |
 |---|---|---|

@@ -19,19 +19,17 @@ el LLM, y los recupera por similitud para personalizar las respuestas del chat.
 
 ## 1. Por qué existe esto
 
-El esquema de BD tiene, desde la primera migración (`92f98a144664_initial_schema.py`),
-dos tablas pensadas exactamente para esto y que nunca se habían usado:
+Un chat sin memoria persistente trata cada conversación como si fuera la primera:
+no sabe que un usuario prefiere ahorrar antes que invertir, o que ya ha hablado antes
+de una meta concreta. El esquema de BD tiene dos tablas pensadas para resolver esto:
 `Conversation` (un turno de chat: `user_id`, `role`, `content`) y
 `UserProfileVector` (un chunk de texto con su `embedding` serializado como JSON).
-Hasta ahora el chat era completamente efímero: solo vivía en el estado de React y,
-mientras duraba una operación pendiente de aprobación, en el checkpointer SQLite de
-LangGraph.
 
-Esta funcionalidad cierra ese círculo con un **RAG casero** (sin librería de
-vectores, sin base de datos vectorial): se guarda cada turno, un job nocturno le
-pide al LLM que extraiga frases cortas de hechos/preferencias del usuario, se
-embeben con `litellm.embedding` y se recuperan por similitud coseno (calculada en
-Python puro) antes de cada pregunta nueva del chat, para inyectarlas en el prompt.
+La solución es un **RAG casero** (sin librería de vectores, sin base de datos
+vectorial): se guarda cada turno, un job nocturno le pide al LLM que extraiga frases
+cortas de hechos/preferencias del usuario, se embeben con `litellm.embedding` y se
+recuperan por similitud coseno (calculada en Python puro) antes de cada pregunta
+nueva del chat, para inyectarlas en el prompt.
 
 ## 2. Vista de conjunto del pipeline
 
