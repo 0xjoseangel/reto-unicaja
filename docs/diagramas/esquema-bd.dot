@@ -1,0 +1,127 @@
+// Esquema de la base de datos — "Habla con tu dinero"
+// Generar: dot -Tpng esquema-bd.dot -o esquema-bd.png  (o -Tsvg)
+digraph esquema_bd {
+    rankdir=LR;
+    node [shape=plaintext, fontname="Helvetica"];
+    edge [fontname="Helvetica", fontsize=10, color="#555555"];
+    bgcolor="white";
+
+    users [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#EDF3EC">
+            <tr><td bgcolor="#346538"><font color="white"><b>users</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">name</td></tr>
+            <tr><td align="left">email (unique)</td></tr>
+            <tr><td align="left">password_hash</td></tr>
+            <tr><td align="left">created_at</td></tr>
+        </table>
+    >];
+
+    accounts [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#F1F1EF">
+            <tr><td bgcolor="#111111"><font color="white"><b>accounts</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">account_type (corriente/ahorro)</td></tr>
+            <tr><td align="left">balance</td></tr>
+            <tr><td align="left">currency</td></tr>
+        </table>
+    >];
+
+    transactions [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#F1F1EF">
+            <tr><td bgcolor="#111111"><font color="white"><b>transactions</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">account_id (FK → accounts)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">amount, transaction_type</td></tr>
+            <tr><td align="left">category, merchant, source</td></tr>
+            <tr><td align="left">date</td></tr>
+        </table>
+    >];
+
+    investments [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#F1F1EF">
+            <tr><td bgcolor="#111111"><font color="white"><b>investments</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">ticker, investment_type</td></tr>
+            <tr><td align="left">shares, avg_purchase_price</td></tr>
+            <tr><td align="left">purchase_date</td></tr>
+        </table>
+    >];
+
+    bizum_transfers [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#F1F1EF">
+            <tr><td bgcolor="#111111"><font color="white"><b>bizum_transfers</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">recipient, amount, concept</td></tr>
+            <tr><td align="left">status, executed_at</td></tr>
+        </table>
+    >];
+
+    pending_actions [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#FCEFC7">
+            <tr><td bgcolor="#8A6D1C"><font color="white"><b>pending_actions</b></font></td></tr>
+            <tr><td align="left">id (PK, = thread_id del grafo)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">action_type (bizum/investment)</td></tr>
+            <tr><td align="left">payload (JSON), status, result</td></tr>
+            <tr><td align="left">created_at, decided_at</td></tr>
+        </table>
+    >];
+
+    goals [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#F1F1EF">
+            <tr><td bgcolor="#111111"><font color="white"><b>goals</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">name, target_amount, current_amount</td></tr>
+            <tr><td align="left">deadline, status</td></tr>
+        </table>
+    >];
+
+    alerts [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#F1F1EF">
+            <tr><td bgcolor="#111111"><font color="white"><b>alerts</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">type, severity, seen</td></tr>
+            <tr><td align="left">title, body</td></tr>
+            <tr><td align="left">card_type, chart_type/data/title, cta_prompt</td></tr>
+            <tr><td align="left">generated_at, expires_at</td></tr>
+        </table>
+    >];
+
+    conversations [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#EAEEF7">
+            <tr><td bgcolor="#2E4C8A"><font color="white"><b>conversations</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">role (user/assistant), content</td></tr>
+            <tr><td align="left">created_at</td></tr>
+        </table>
+    >];
+
+    user_profile_vectors [label=<
+        <table border="1" cellborder="0" cellspacing="0" cellpadding="4" bgcolor="#EAEEF7">
+            <tr><td bgcolor="#2E4C8A"><font color="white"><b>user_profile_vectors</b></font></td></tr>
+            <tr><td align="left">id (PK)</td></tr>
+            <tr><td align="left">user_id (FK → users)</td></tr>
+            <tr><td align="left">chunk_text, embedding (JSON floats)</td></tr>
+            <tr><td align="left">source, created_at</td></tr>
+        </table>
+    >];
+
+    users -> accounts;
+    users -> transactions;
+    accounts -> transactions;
+    users -> investments;
+    users -> bizum_transfers;
+    users -> pending_actions;
+    users -> goals;
+    users -> alerts;
+    users -> conversations;
+    users -> user_profile_vectors;
+}

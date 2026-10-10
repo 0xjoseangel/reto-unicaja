@@ -1,0 +1,29 @@
+// Grafo de LangGraph — build_graph() en backend/app/agent/graph.py
+// Generar: dot -Tpng grafo-langgraph.dot -o grafo-langgraph.png
+digraph grafo_langgraph {
+    rankdir=TB;
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, color="#333333"];
+    edge [fontname="Helvetica", fontsize=10, color="#555555"];
+    bgcolor="white";
+
+    START [shape=circle, style=filled, fillcolor="#333333", fontcolor=white, label="START", width=0.9];
+    END   [shape=circle, style=filled, fillcolor="#333333", fontcolor=white, label="END", width=0.9];
+
+    agent [label="agent_node\n(Fase 1 — tool calling)", fillcolor="#D7E8D4"];
+    validate [label="validate_node\n(determinista)\nactions.validate_proposal\ncrea PendingAction", fillcolor="#FCEFC7"];
+    await_approval [label="await_approval_node\ninterrupt()\n⏸ pausa el grafo,\nestado en checkpointer", fillcolor="#F7D7D7"];
+    execute [label="execute_node\n(determinista, idempotente)\nactions.execute", fillcolor="#FCEFC7"];
+    respond [label="respond_node\n(Fase 2 — streaming)\nstream_response", fillcolor="#D7E8D4"];
+
+    START -> agent;
+    agent -> validate [label="propuso una acción\n(bizum/inversión)"];
+    agent -> respond [label="respuesta directa\n(sin acción)"];
+    validate -> await_approval [label="válida"];
+    validate -> respond [label="inválida\n(saldo/límite)"];
+    await_approval -> execute [label="usuario aprueba\n(resume)"];
+    await_approval -> respond [label="usuario rechaza"];
+    execute -> respond;
+    respond -> END;
+
+    { rank=same; validate; }
+}

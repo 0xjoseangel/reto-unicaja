@@ -99,14 +99,19 @@ FROM python:3.12-slim          # 1. Parte de una imagen oficial de Python 3.12 (
 
 WORKDIR /app                   # 2. Todos los comandos siguientes se ejecutan desde /app
 
-COPY requirements.txt .        # 3. Copia solo el requirements.txt (antes que el código)
-RUN pip install --no-cache-dir -r requirements.txt  # 4. Instala dependencias
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libsndfile1 espeak-ng && rm -rf /var/lib/apt/lists/*
+# 3. Paquetes del sistema que necesita el modo voz: ffmpeg/libsndfile1 para decodificar
+#    audio (Whisper), espeak-ng como voz de respaldo de Piper.
 
-COPY . .                       # 5. Copia el resto del código
+COPY requirements.txt .        # 4. Copia solo el requirements.txt (antes que el código)
+RUN pip install --no-cache-dir -r requirements.txt  # 5. Instala dependencias
 
-RUN mkdir -p /app/data         # 6. Crea la carpeta donde vivirá la base de datos SQLite
+COPY . .                       # 6. Copia el resto del código
 
-EXPOSE 8000                    # 7. Documenta que este contenedor usa el puerto 8000
+RUN mkdir -p /app/data         # 7. Crea la carpeta donde vivirá la base de datos SQLite
+
+EXPOSE 8000                    # 8. Documenta que este contenedor usa el puerto 8000
 ```
 
 **¿Por qué copiar `requirements.txt` antes que el código?**  
@@ -161,6 +166,21 @@ networks:        # Redes definidas
 
 ```yaml
 services:
+  ollama:
+    image: ollama/ollama          # Opcional: solo arranca con `docker compose --profile ollama up`
+    profiles: ["ollama"]          # No se levanta en un `docker compose up` normal
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia      # Requiere GPU Nvidia — pensado para correr modelos locales
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - app_network
+
   backend:
     build: ./backend              # Construye la imagen usando backend/Dockerfile
     ports:
@@ -168,11 +188,14 @@ services:
     volumes:
       - ./backend:/app            # Monta el código local en /app (hot-reload)
       - sqlite_data:/app/data     # Volumen persistente para la base de datos SQLite
+      - ml_models:/app/models     # Volumen persistente para los modelos de Whisper/Piper
     env_file:
-      - ./backend/.env            # Carga GROQ_API_KEY y otras variables desde el .env
+      - ./backend/.env            # Carga las API keys (Anthropic, Gemini, Groq...) y demás settings
     environment:
       - DATABASE_URL=sqlite:////app/data/db.sqlite3
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - MODEL_CACHE_DIR=/app/models
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    # Las migraciones de Alembic se aplican solas en cada arranque, antes de levantar uvicorn.
     networks:
       - app_network
 
@@ -192,6 +215,8 @@ services:
 
 volumes:
   sqlite_data:                    # Volumen con nombre: los datos de SQLite sobreviven reinicios
+  ollama_data:                    # Modelos descargados por Ollama (solo si se usa el perfil "ollama")
+  ml_models:                      # Modelos de Whisper/Piper descargados en el primer arranque
 
 networks:
   app_network:
@@ -214,7 +239,8 @@ Contenedor frontend (Vite, puerto 3000)
 Contenedor backend (FastAPI, puerto 8000)
   │
   │  Consulta la base de datos SQLite en /app/data/db.sqlite3
-  │  Llama a la API de Groq (internet externo)
+  │  Llama al proveedor de IA configurado en litellm_model (Anthropic Claude por
+  │  defecto; también soporta Gemini, Groq, Mistral u Ollama local)
   ▼
 Respuesta JSON → Vite → Navegador
 ```

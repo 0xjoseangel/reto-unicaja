@@ -145,6 +145,24 @@ usuario no pare el resto del batch.
 para una pregunta *nueva* — el resume no pasa por aquí, reanuda el estado ya fijado
 en el checkpointer.
 
+### 3.5. Leer el historial — `GET /chat/history` y `GET /chat/history/{day}`
+
+`Conversation` no tiene un id de sesión/hilo propio (solo `id, user_id, role,
+content, created_at`), así que "una conversación pasada" se deriva agrupando filas
+por día natural de `created_at`. Dos rutas en `chat.py`, de solo lectura:
+
+- **`GET /chat/history`** → `list[ConversationSessionOut]` (`date`, `message_count`,
+  `preview`): un resumen por día, más reciente primero. `preview` es el primer
+  mensaje de usuario de ese día, recortado.
+- **`GET /chat/history/{day}`** (formato `YYYY-MM-DD`) → `list[ConversationMessageOut]`
+  (`role`, `content`, `created_at`): la transcripción completa de ese día, en orden
+  cronológico. 400 si el formato de fecha no es válido.
+
+Ambas filtran siempre por el `user_id` del JWT — nunca se puede leer el historial de
+otro usuario. El frontend las consume desde `ChatHistoryView.jsx` (pestaña
+"Historial"): lista de días a la izquierda, transcripción renderizada en Markdown a
+la derecha.
+
 ## 4. Decisiones de diseño y su porqué
 
 - **Hechos extraídos por LLM, no turnos crudos.** Guardar el texto literal de cada

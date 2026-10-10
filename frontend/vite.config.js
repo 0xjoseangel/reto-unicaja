@@ -24,7 +24,6 @@ export default defineConfig({
     proxy: {
       '/auth': backendUrl,
       '/chat': backendUrl,
-      '/transactions': backendUrl,
       '/voice': backendUrl,
       '/dashboard': backendUrl,
     },

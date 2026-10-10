@@ -1,0 +1,76 @@
+// Arquitectura general — "Habla con tu dinero"
+// Generar: dot -Tpng arquitectura.dot -o arquitectura.png
+digraph arquitectura {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, color="#333333"];
+    edge [fontname="Helvetica", fontsize=10, color="#555555"];
+    bgcolor="white";
+
+    subgraph cluster_frontend {
+        label="Frontend";
+        style="rounded";
+        bgcolor="#EAEEF7";
+        frontend [label="React + Vite\nChatBox / DashboardPage /\nChatHistoryView / VoiceModal\n(Recharts para gráficos)", fillcolor="#D6E0F5"];
+    }
+
+    subgraph cluster_backend {
+        label="Backend — FastAPI";
+        style="rounded";
+        bgcolor="#EDF3EC";
+        routes [label="API routes\n(auth, chat, dashboard, voice,\ntransactions)\nPydantic request/response", fillcolor="#D7E8D4"];
+
+        subgraph cluster_agent {
+            label="Agente / orquestación";
+            style="rounded";
+            bgcolor="#FCEFC7";
+            langgraph_node [label="graph.py\nLangGraph\n(agent/validate/await_approval/\nexecute/respond)", fillcolor="#FBE3A6"];
+            chat_agent [label="chat_agent.py\ntool calling (26 tools)", fillcolor="#FBE3A6"];
+            dashboard_agent [label="dashboard_agent.py\ngenera tarjetas IA\n(job 22:00)", fillcolor="#FBE3A6"];
+            memory_agent [label="memory_agent.py\nembeddings + similitud coseno\n(job 23:00)", fillcolor="#FBE3A6"];
+            mcp [label="financial_mcp.py\nherramientas de consulta\nsobre SQLAlchemy", fillcolor="#FBE3A6"];
+        }
+
+        orm [label="SQLAlchemy 2.0\n(modelos ORM)", fillcolor="#D7E8D4"];
+        sqlite [shape=cylinder, label="SQLite\n(db.sqlite3 +\ncheckpoints.sqlite)", fillcolor="#C9DFC6"];
+    }
+
+    subgraph cluster_litellm {
+        label="litellm — capa de abstracción de proveedor";
+        style="rounded";
+        bgcolor="#F7D7D7";
+        litellm [label="litellm.completion /\nlitellm.embedding", fillcolor="#F3B9B9"];
+    }
+
+    subgraph cluster_providers {
+        label="Proveedores de IA (configurable por .env)";
+        style="rounded";
+        bgcolor="#F1F1EF";
+        anthropic [label="Anthropic\n(Claude, por defecto)"];
+        gemini [label="Gemini\n(también embeddings)"];
+        groq [label="Groq"];
+        mistral [label="Mistral"];
+        ollama [label="Ollama\n(local, opcional)"];
+    }
+
+    voice [label="faster-whisper + Piper\n(voz → texto, texto → voz)", fillcolor="#F3B9B9"];
+
+    frontend -> routes [label="HTTP/SSE + JWT"];
+    routes -> langgraph_node [label="/chat"];
+    routes -> dashboard_agent [label="/dashboard"];
+    routes -> voice [label="/voice"];
+    langgraph_node -> chat_agent;
+    langgraph_node -> mcp;
+    chat_agent -> litellm;
+    dashboard_agent -> litellm;
+    memory_agent -> litellm;
+    mcp -> orm;
+    orm -> sqlite;
+    langgraph_node -> sqlite [label="checkpointer\n(estado de interrupt())"];
+    litellm -> anthropic;
+    litellm -> gemini;
+    litellm -> groq;
+    litellm -> mistral;
+    litellm -> ollama;
+    voice -> routes [style=dashed];
+}
