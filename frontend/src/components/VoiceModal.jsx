@@ -330,6 +330,9 @@ export default function VoiceModal({ history, onClose, onComplete }) {
   // por voz: una frase mal transcrita no puede aprobar un pago) y el agente responde
   // hablando con el resultado. Después se reanuda la conversación.
   async function handleActionDecision(action, decision) {
+    // Guard de reentrancia: un segundo tap tras vaciar el ref (p.ej. doble clic en
+    // confirmar/cancelar) ya no tiene contexto que leer — se ignora en vez de lanzar.
+    if (!pendingContextRef.current) return
     const { userText } = pendingContextRef.current
     pendingContextRef.current = null
     setPendingBizum(null)

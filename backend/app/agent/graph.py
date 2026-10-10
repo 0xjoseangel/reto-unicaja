@@ -21,6 +21,7 @@ Cada petición de chat es un thread nuevo (uuid). Si el grafo se interrumpe, ese
 el action_id que recibe el frontend y con el que se reanuda.
 """
 import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -42,9 +43,13 @@ from app.agent.chat_agent import (
     stream_response,
 )
 from app.agent.financial_mcp import OperationError
+from app.agent.memory_agent import retrieve_relevant_memories
 from app.core.config import settings
-from app.models.financial import PendingAction
+from app.core.database import SessionLocal
+from app.models.financial import Conversation, PendingAction
 from app.schemas.financial import ChatResponse, PendingBizumAction, PendingInvestmentAction
+
+logger = logging.getLogger(__name__)
 
 
 class ChatState(TypedDict, total=False):
@@ -210,15 +215,34 @@ def _get_graph():
 
 # ── Ejecución ─────────────────────────────────────────────────────────────────
 
-async def _run(graph_input, thread_id: str) -> AsyncIterator[dict]:
+def _save_message(user_id: int, role: str, content: str) -> None:
+    """Persiste un turno de conversación. Falla en silencio (log) para que un
+    problema de BD nunca tumbe una respuesta de chat ya generada."""
+    if not content.strip():
+        return
+    db = SessionLocal()
+    try:
+        db.add(Conversation(user_id=user_id, role=role, content=content))
+        db.commit()
+    except Exception:
+        logger.exception("No se pudo persistir Conversation (user_id=%s, role=%s)", user_id, role)
+    finally:
+        db.close()
+
+
+async def _run(graph_input, thread_id: str, user_id: int) -> AsyncIterator[dict]:
     """Ejecuta (o reanuda) el grafo y produce los eventos para el cliente:
     token / done. Si el grafo se para en await_approval, el `done` lleva el
-    pending_action y el estado se conserva para reanudarlo; si termina, se borra."""
+    pending_action y el estado se conserva para reanudarlo; si termina, se borra
+    y se persiste el texto final del asistente."""
     graph = _get_graph()
     cfg = {"configurable": {"thread_id": thread_id}}
     interrupted = False
+    assistant_text = ""
     async for mode, chunk in graph.astream(graph_input, cfg, stream_mode=["custom", "updates"]):
         if mode == "custom":
+            if chunk.get("type") == "token":
+                assistant_text += chunk["text"]
             yield chunk
         elif "__interrupt__" in chunk:
             interrupted = True
@@ -231,6 +255,7 @@ async def _run(graph_input, thread_id: str) -> AsyncIterator[dict]:
             }
     if not interrupted:
         await graph.checkpointer.adelete_thread(thread_id)
+        _save_message(user_id, "assistant", assistant_text)
 
 
 def _friendly_error(e: Exception) -> str:
@@ -250,8 +275,23 @@ async def _sse(events: AsyncIterator[dict]):
         yield f"data: {json.dumps({'type': 'error', 'text': _friendly_error(e)}, ensure_ascii=False)}\n\n"
 
 
+def _build_system_prompt(user_id: int, message: str) -> str:
+    """Antepone al SYSTEM_PROMPT un bloque con lo que se sabe del usuario, si hay
+    algo relevante. Si falla la recuperación (red, embeddings...), se usa el
+    prompt base sin memoria — nunca debe bloquear una respuesta de chat."""
+    try:
+        memories = retrieve_relevant_memories(user_id, message)
+    except Exception:
+        logger.exception("Fallo recuperando memoria de usuario (user_id=%s)", user_id)
+        memories = []
+    if not memories:
+        return SYSTEM_PROMPT
+    bloque = "Lo que sabes de este usuario:\n" + "\n".join(f"- {m}" for m in memories)
+    return f"{bloque}\n\n{SYSTEM_PROMPT}"
+
+
 def _initial_state(message: str, user_id: int, history: list[dict], voice_mode: bool) -> ChatState:
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": _build_system_prompt(user_id, message)}]
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": message})
@@ -265,7 +305,8 @@ async def process_chat_stream(message: str, user_id: int, history: list[dict] | 
         yield f"data: {json.dumps({'type': 'error', 'text': key_error}, ensure_ascii=False)}\n\n"
         return
     state = _initial_state(message, user_id, history or [], voice_mode)
-    async for chunk in _sse(_run(state, str(uuid.uuid4()))):
+    _save_message(user_id, "user", message)
+    async for chunk in _sse(_run(state, str(uuid.uuid4()), user_id)):
         yield chunk
 
 
@@ -279,8 +320,9 @@ async def resume_chat_stream(action_id: str):
     if not snapshot.next:
         yield f"data: {json.dumps({'type': 'error', 'text': 'La operación ya no está disponible.'}, ensure_ascii=False)}\n\n"
         return
+    user_id = snapshot.values["user_id"]
     decision = await _decision_from_db(action_id)
-    async for chunk in _sse(_run(Command(resume=decision), action_id)):
+    async for chunk in _sse(_run(Command(resume=decision), action_id, user_id)):
         yield chunk
 
 
@@ -300,9 +342,10 @@ async def process_chat(message: str, user_id: int, history: list[dict] | None = 
     key_error = _check_api_key(_build_model())
     if key_error:
         return ChatResponse(response=key_error)
+    _save_message(user_id, "user", message)
     text, done = "", {}
     try:
-        async for ev in _run(_initial_state(message, user_id, history or [], False), str(uuid.uuid4())):
+        async for ev in _run(_initial_state(message, user_id, history or [], False), str(uuid.uuid4()), user_id):
             if ev["type"] == "token":
                 text += ev["text"]
             elif ev["type"] == "done":

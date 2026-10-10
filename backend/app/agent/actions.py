@@ -186,17 +186,23 @@ def execute(action_id: str) -> dict:
                     p["price"], p["currency"], p["total_eur"], p["investment_type"],
                 )
         except OperationError as e:
-            db.rollback()
             result = {"success": False, "error": str(e)}
-            db.execute(
-                update(PendingAction)
-                .where(PendingAction.id == action_id, PendingAction.status == "approved")
-                .values(status="failed", result=json.dumps(result, ensure_ascii=False))
-            )
+        except Exception as e:
+            # Un fallo inesperado (no OperationError) aquí no debe dejar la acción
+            # atascada en "approved" para siempre sin forma de reintentar: se marca
+            # "failed" igual que un fallo de validación conocido.
+            result = {"success": False, "error": f"Error inesperado al ejecutar la operación: {e}"}
+        else:
+            action.result = json.dumps(result, ensure_ascii=False)
             db.commit()
             return result
 
-        action.result = json.dumps(result, ensure_ascii=False)
+        db.rollback()
+        db.execute(
+            update(PendingAction)
+            .where(PendingAction.id == action_id, PendingAction.status == "approved")
+            .values(status="failed", result=json.dumps(result, ensure_ascii=False))
+        )
         db.commit()
         return result
     except Exception:

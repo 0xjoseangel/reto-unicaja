@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { useAuth } from './context/AuthContext'
 import ChatBox from './components/ChatBox'
+import ChatHistoryView from './components/ChatHistoryView'
 import DashboardPage from './components/DashboardPage'
 import LoginPage from './components/LoginPage'
 import VoiceModal from './components/VoiceModal'
@@ -8,6 +9,7 @@ import VoiceModal from './components/VoiceModal'
 const TABS = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'chat', label: 'Chat' },
+  { id: 'history', label: 'Historial' },
 ]
 
 export default function App() {
@@ -114,6 +116,9 @@ export default function App() {
             initialPrompt={initialPrompt}
             onInitialPromptConsumed={() => setInitialPrompt(null)}
           />
+        </div>
+        <div className="absolute inset-0" hidden={view !== 'history'}>
+          <ChatHistoryView />
         </div>
 
         {/* Botón flotante de voz — solo en el dashboard: en el chat ya hay un botón de

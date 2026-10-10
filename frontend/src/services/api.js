@@ -72,3 +72,13 @@ export async function readSSE(res, onEvent) {
 export function decideAction(actionId, decision, options) {
   return apiStream(`/chat/actions/${actionId}`, { decision }, options)
 }
+
+// Conversaciones pasadas, agrupadas por día (más reciente primero).
+export function getChatHistoryDays() {
+  return apiGet('/chat/history')
+}
+
+// Transcripción completa de un día concreto (formato YYYY-MM-DD).
+export function getChatHistoryDay(day) {
+  return apiGet(`/chat/history/${day}`)
+}

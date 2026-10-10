@@ -92,6 +92,10 @@ def env(monkeypatch):
     monkeypatch.setattr(chat_agent.litellm, "acompletion", llm.acompletion)
     monkeypatch.setattr(graph, "_build_model", lambda: "anthropic/test")
     monkeypatch.setattr(graph, "_check_api_key", lambda model: None)
+    # Persistencia de Conversation va a la misma BD temporal (no a la real), y la
+    # recuperación de memoria no debe llamar a litellm.embedding por red en tests.
+    monkeypatch.setattr(graph, "SessionLocal", TestSessionLocal)
+    monkeypatch.setattr(graph, "retrieve_relevant_memories", lambda user_id, query, top_k=3: [])
 
     # yfinance: AAPL a 200 USD, 1 EUR = 1.25 USD → 1 AAPL = 160 EUR
     monkeypatch.setattr(actions, "get_market_quote", lambda t: {
@@ -185,6 +189,27 @@ def test_execute_is_idempotent_on_its_own(env):
     assert first == second
     assert _checking_balance(env, env.users[0]) == 80.0
     assert _count(env, BizumTransfer) == 1
+
+
+def test_unexpected_execute_error_marks_failed_not_stuck(env, monkeypatch):
+    """Un fallo que no es OperationError (p.ej. un error de BD) no debe dejar la
+    PendingAction congelada en "approved" sin forma de reintentar: se marca
+    "failed" igual que un fallo de validación conocido, y el dinero no se mueve."""
+    pending = _propose_bizum(env)
+    actions.decide(pending["action_id"], env.users[0], "approve")
+
+    monkeypatch.setattr(actions, "execute_bizum", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    result = actions.execute(pending["action_id"])
+
+    assert result["success"] is False
+    assert _checking_balance(env, env.users[0]) == 100.0
+    assert _count(env, BizumTransfer) == 0
+
+    db = env.Session()
+    try:
+        assert db.get(PendingAction, pending["action_id"]).status == "failed"
+    finally:
+        db.close()
 
 
 def test_reject_moves_no_money(env):

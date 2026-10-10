@@ -13,6 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.agent.dashboard_agent import generate_dashboard_cards
+from app.agent.memory_agent import extract_and_store_memories
 from app.core.database import SessionLocal
 from app.models.financial import User
 
@@ -45,6 +46,23 @@ def _generate_weekly_summary() -> None:
     _generate_for_all_users()
 
 
+def _extract_memories_for_all_users() -> None:
+    """Job nocturno (23:00, una hora después del dashboard): extrae hechos y
+    preferencias nuevos de las conversaciones recientes de cada usuario y los
+    guarda embebidos para personalizar el chat."""
+    db = SessionLocal()
+    try:
+        user_ids = [u.id for u in db.query(User.id).all()]
+    finally:
+        db.close()
+
+    for user_id in user_ids:
+        try:
+            extract_and_store_memories(user_id)
+        except Exception:
+            logger.exception("Fallo extrayendo memoria de usuario para user_id=%s", user_id)
+
+
 def start_scheduler() -> None:
     scheduler.add_job(
         _generate_for_all_users,
@@ -56,6 +74,12 @@ def start_scheduler() -> None:
         _generate_weekly_summary,
         trigger=CronTrigger(day_of_week="mon", hour=9, minute=0),
         id="weekly_summary",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _extract_memories_for_all_users,
+        trigger=CronTrigger(hour=23, minute=0),
+        id="nightly_memory_extraction",
         replace_existing=True,
     )
     scheduler.start()

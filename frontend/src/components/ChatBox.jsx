@@ -80,6 +80,7 @@ export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onH
   const [pendingBizum, setPendingBizum] = useState(null)
   const [pendingInvestment, setPendingInvestment] = useState(null)
   const bottomRef = useRef(null)
+  const decisionInFlightRef = useRef(false)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -190,6 +191,11 @@ export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onH
   // Aprobar o rechazar una operación propuesta. La decisión va al backend con el
   // action_id; es la única forma de que se ejecute (escribir "sí" en el chat no vale).
   async function handleActionDecision(action, decision) {
+    // Guard de reentrancia: setPendingBizum/setPendingInvestment(null) no desmonta
+    // el modal hasta el siguiente render, así que un doble clic puede disparar esta
+    // función dos veces con la misma action antes de que desaparezca el botón.
+    if (decisionInFlightRef.current) return
+    decisionInFlightRef.current = true
     setPendingBizum(null)
     setPendingInvestment(null)
     setLoading(true)
@@ -213,6 +219,7 @@ export default function ChatBox({ onOpenVoice, registerVoiceCompleteHandler, onH
     } finally {
       setLoading(false)
       setStreamingMsgIdx(-1)
+      decisionInFlightRef.current = false
     }
   }
 

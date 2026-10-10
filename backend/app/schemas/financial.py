@@ -86,6 +86,24 @@ class ChatResponse(BaseModel):
     pending_action: PendingBizumAction | PendingInvestmentAction | None = None
 
 
+# ── Historial de conversaciones pasadas ─────────────────────────────────────
+
+class ConversationSessionOut(BaseModel):
+    """Una conversación pasada, agrupada por día natural (Conversation no tiene
+    un id de sesión/hilo propio)."""
+    date: str   # "YYYY-MM-DD"
+    message_count: int
+    preview: str
+
+
+class ConversationMessageOut(BaseModel):
+    role: str   # "user" | "assistant"
+    content: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 # ── Dashboard proactivo ─────────────────────────────────────────────────────
 
 class AlertCardIn(BaseModel):

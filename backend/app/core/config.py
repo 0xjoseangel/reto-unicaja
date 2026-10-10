@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     # Modelo en formato litellm: "anthropic/claude-haiku-4-5", "ollama/llama3.2", etc.
     litellm_model: str = "anthropic/claude-haiku-4-5"
 
+    # Memoria de usuario: embeddings de hechos extraídos del historial de chat
+    embedding_model: str = "gemini/text-embedding-004"
+
     # API keys — litellm las lee nativas de estas variables de entorno
     anthropic_api_key: str = ""
     openai_api_key: str = ""
