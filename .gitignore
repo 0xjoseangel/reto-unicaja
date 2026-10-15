@@ -21,6 +21,7 @@ backend/data/
 
 # Caché de modelos ML (Whisper/Piper) montada por Docker — no es código del repo
 backend/models/
+backend/.model_cache/
 
 # Variables de entorno con secretos
 .env
@@ -56,3 +57,8 @@ frontend/.agents/skills/imagegen-frontend-web/SKILL.md
 frontend/.agents/skills/industrial-brutalist-ui/SKILL.md
 frontend/.agents/skills/minimalist-ui/SKILL.md
 ROADMAP.md
+docs/video/demo-raw.mp4
+docs/video/intro.mp4
+docs/video/Logo_Unicaja.svg
+docs/video/presentacion-final.mp4
+docs/video/UGR-MARCA-01-color.svg
