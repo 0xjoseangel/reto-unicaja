@@ -46,7 +46,7 @@ código determinista y testeado — nunca el modelo directamente. Detalle comple
 ## Arrancarlo
 
 ```bash
-git clone <este repo>
+git clone https://github.com/0xjoseangel/reto-unicaja.git
 cd reto-unicaja
 cp backend/.env.example backend/.env   # rellena al menos una API key
 docker compose up --build
